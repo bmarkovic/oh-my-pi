@@ -19,6 +19,11 @@ export const createSessionCommand = type({
 	"tools?": "unknown[]",
 });
 
+export const interruptSessionCommand = type({
+	type: "'interrupt_session'",
+	sessionId: "/\\S/",
+});
+
 export const promptSessionCommand = type({
 	type: "'prompt_session'",
 	sessionId: "/\\S/",

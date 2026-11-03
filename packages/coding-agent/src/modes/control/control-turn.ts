@@ -68,7 +68,7 @@ export class ControlTurnController {
 			operatorUserId,
 			usageBaseline: usageBaseline(session.sessionManager),
 			assistantBaseline: session.getLastAssistantMessage(),
-			deadlineExpired: false,
+			stop: undefined,
 			settled: false,
 			deadline: undefined,
 		};
@@ -82,6 +82,22 @@ export class ControlTurnController {
 			at: Date.now(),
 		});
 		void this.#run(record, turn, prompt);
+	}
+
+	/**
+	 * Soft-stop the active turn: abort its generation and tools. The outcome is
+	 * published once the run has unwound. A stop already requested (interrupt or
+	 * deadline) stands. Returns `false` when there is no active turn.
+	 */
+	interrupt(record: ControlSessionRecord): boolean {
+		const turn = record.turn;
+		if (!turn) return false;
+		if (turn.stop !== undefined) return true;
+		turn.stop = "interrupt";
+		record.session.abort({ reason: "control interrupt" }).catch((error: unknown) => {
+			logger.warn("control interrupt abort failed", { sessionId: record.sessionId, error: String(error) });
+		});
+		return true;
 	}
 
 	/** Queue a steering message into the active turn; no new start and no deadline change. */
@@ -99,13 +115,17 @@ export class ControlTurnController {
 			runError = error;
 		}
 		if (turn.settled) return;
-		const last = record.session.getLastAssistantMessage();
-		if (runError !== undefined) {
-			this.#settleFailed(record, turn, "execution_failed", describeError(runError));
+		if (turn.stop === "interrupt") {
+			this.#settleInterrupted(record, turn);
 			return;
 		}
-		if (turn.deadlineExpired) {
+		const last = record.session.getLastAssistantMessage();
+		if (turn.stop === "timeout") {
 			this.#settleFailed(record, turn, "timeout", "turn deadline exceeded");
+			return;
+		}
+		if (runError !== undefined) {
+			this.#settleFailed(record, turn, "execution_failed", describeError(runError));
 			return;
 		}
 		if (last === undefined || last === turn.assistantBaseline) {
@@ -124,8 +144,8 @@ export class ControlTurnController {
 	}
 
 	#expireDeadline(record: ControlSessionRecord, turn: ControlTurn): void {
-		if (turn.settled || turn.deadlineExpired) return;
-		turn.deadlineExpired = true;
+		if (turn.settled || turn.stop !== undefined) return;
+		turn.stop = "timeout";
 		record.session.abort({ reason: "control turn deadline" }).catch((error: unknown) => {
 			logger.warn("control turn abort after deadline failed", { sessionId: record.sessionId, error: String(error) });
 		});
@@ -140,6 +160,19 @@ export class ControlTurnController {
 				sessionId: record.sessionId,
 				at: Date.now(),
 				output,
+				...(usage ? { usage } : {}),
+			};
+		});
+	}
+
+	#settleInterrupted(record: ControlSessionRecord, turn: ControlTurn): void {
+		this.#settle(record, turn, () => {
+			const usage = turnUsage(record, turn);
+			return {
+				version: 2,
+				type: "session_interrupted",
+				sessionId: record.sessionId,
+				at: Date.now(),
 				...(usage ? { usage } : {}),
 			};
 		});

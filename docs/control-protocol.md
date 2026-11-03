@@ -25,7 +25,7 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 
 ## Catalog and session creation
 
-Advertised features: `catalog`, `steering`, `usage`.
+Advertised features: `catalog`, `steering`, `usage`, `interrupt`.
 
 - `query_catalog` returns `models` (`{id: "provider/modelId", provider}`) from the process model registry, and `agents` (`{name, description, roles: [], defaultModel?}`) discovered from the daemon's working directory. Prompts and definition paths are never included. `defaultModel` is set only when the agent's first model pattern is exactly a catalog id; looser patterns are omitted rather than guessed. `roles` is empty until agent roles exist.
 - `create_session` needs an accepted `subscribe_events`. `workspacePath` must be an absolute, existing, readable directory (`invalid_workspace` otherwise). `agent` and `model` are exact catalog names and ids (`unknown_agent`, `unknown_model`); an explicit model disables model fallback. Every selection is resolved before anything is created, so a rejected request creates no session.
@@ -42,3 +42,10 @@ Advertised features: `catalog`, `steering`, `usage`.
 - `operatorUserId` is recorded on the turn and never used for authorization.
 - Non-empty `tools` on `prompt_session` are refused with `unsupported_operation` in this build.
 - `prompt_session` requires an accepted `subscribe_events`; a subscribed connection receives the events of the sessions its credential owns.
+
+## Interrupt
+
+- `interrupt_session` on an active session is acknowledged, then the turn's generation and tools are aborted. Once the run has unwound, the turn settles as `session_interrupted{usage?}` and the handle returns to idle. An interrupt is neither a success nor a failure.
+- A stop that arrives first decides the turn: an interrupt after the deadline fired, or a deadline after an interrupt, does not change the outcome that is already in progress.
+- `interrupt_session` on an idle session is an idempotent `ack` with no event.
+- An unknown handle answers `unknown_session`.

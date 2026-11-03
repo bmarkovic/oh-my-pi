@@ -21,6 +21,7 @@ import {
 	createSessionCommand,
 	type PromptSessionCommand,
 	promptSessionCommand,
+	interruptSessionCommand,
 	queryCatalogCommand,
 	sessionCreatedFrame,
 } from "./wire/commands";
@@ -63,6 +64,23 @@ export class ControlDaemon {
 						connection.subscribe();
 						this.#subscribers.add(connection);
 						connection.reply(ackFrame(id));
+					},
+				}),
+			],
+			[
+				"interrupt_session",
+				defineOperation({
+					schema: interruptSessionCommand,
+					requiresSubscription: true,
+					run: (connection, id, command) => {
+						const record = this.#registry.lookup(connection.principal, command.sessionId);
+						if (!record) {
+							connection.reject("unknown_session", "session is not retained", id);
+							return;
+						}
+						// Ack first: the interrupted outcome is published only after the run has unwound.
+						connection.reply(ackFrame(id));
+						this.#turns.interrupt(record);
 					},
 				}),
 			],

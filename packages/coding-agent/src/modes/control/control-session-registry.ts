@@ -25,8 +25,8 @@ export interface ControlTurn {
 	readonly usageBaseline: ControlUsageBaseline;
 	/** The last assistant message when the turn started; a different one at the end means the turn produced output. */
 	readonly assistantBaseline: unknown;
-	/** The turn deadline fired; the outcome is then `timeout` whatever the run reports. */
-	deadlineExpired: boolean;
+	/** The first stop request on this turn: an interrupt or the deadline. It decides the outcome. */
+	stop: "interrupt" | "timeout" | undefined;
 	/** Set once the turn's outcome has been published. */
 	settled: boolean;
 	deadline: Timer | undefined;
