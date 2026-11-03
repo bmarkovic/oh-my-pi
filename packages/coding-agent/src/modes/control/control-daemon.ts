@@ -452,11 +452,13 @@ export class ControlDaemon {
 			}
 		}
 
-		// Resolve every selection before any side effect, so a bad selection creates nothing.
+		// Resolve every selection before any side effect, so a bad selection creates nothing. Agents come from
+		// the same discovery `query_catalog` lists (the daemon's cwd), so an advertised agent is always accepted
+		// and an unlisted one is never selected through the worktree it happens to contain.
 		const agent =
 			command.agent === undefined
 				? undefined
-				: (await this.#catalog.agents(command.workspacePath)).find(candidate => candidate.name === command.agent);
+				: (await this.#catalog.agents(this.#daemonCwd)).find(candidate => candidate.name === command.agent);
 		if (command.agent !== undefined && agent === undefined) {
 			connection.reject("unknown_agent", "agent is not in the catalog", id);
 			return;

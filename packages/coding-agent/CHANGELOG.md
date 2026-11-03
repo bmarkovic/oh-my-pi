@@ -20,6 +20,7 @@
 - Steering a control session while it waits on a question no longer closes the question: the decision stays pending until it is answered, interrupted, terminated or past its deadline, and the steering reaches the model after the answer
 - Hard-terminating a control session whose subagent is running now reports that child as `session_terminated` only; it no longer sends a `session_failed` for the abort the stop caused just before
 - Control tool bindings with dotted names such as `git.status` now reach the model under a provider-safe name (`git_status`); before, providers that accept only `[a-zA-Z0-9_-]` dropped the call and its result from the history, so the model never saw the tool answer and repeated the call
+- `create_session` now accepts exactly the agents `query_catalog` lists: it used to look an agent up in the task workspace instead, so a listed project agent could be rejected as unknown and an unlisted one accepted
 
 ## [18.16.0] - 2026-11-02
 

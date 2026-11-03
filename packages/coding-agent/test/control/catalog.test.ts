@@ -108,6 +108,53 @@ describe("control create_session", () => {
 		expect(factory.requests[0].model?.id).toBe("model-a");
 	});
 
+	it("accepts exactly the agents the catalog lists, whatever the task workspace holds", async () => {
+		const daemonDir = TempDir.createSync("@control-catalog-scope-daemon-");
+		const workspaceDir = TempDir.createSync("@control-catalog-scope-workspace-");
+		cleanups.push(async () => {
+			await daemonDir.remove();
+			await workspaceDir.remove();
+		});
+		const mock = makeMock();
+		const factory = await createMockSessionFactory(mock);
+		const workspaceOnly: AgentDefinition = {
+			...agents[1],
+			name: "workspace-only",
+			description: "Only in the worktree",
+		};
+		// Discovery is cwd-scoped, as the real one is: the daemon's cwd and the task worktree differ.
+		const daemon = await startDaemonWith({
+			catalog: {
+				models: () => [mock.model],
+				agents: async cwd => (cwd === workspaceDir.path() ? [workspaceOnly] : [agents[0]]),
+			},
+			createSession: factory.factory,
+			daemonCwd: daemonDir.path(),
+		});
+		cleanups.push(() => daemon.dispose());
+		cleanups.push(() => factory.cleanup());
+		const client = await connectClient(daemon.server.url, daemon.server.bearerHeaders);
+		clients.push(client);
+		await handshake(client);
+		await subscribe(client);
+
+		// Contract section 4.2: the catalog is the selection list; the task workspace does not widen or narrow it.
+		const catalog = await client.request({ version: 2, id: "cat", type: "query_catalog" });
+		expect((catalog.agents as Array<{ name: string }>).map(agent => agent.name)).toEqual(["implementer"]);
+		const create = (id: string, agent: string) =>
+			client.request({
+				version: 2,
+				id,
+				type: "create_session",
+				workspacePath: workspaceDir.path(),
+				taskRef: "00000000-0000-4000-8000-000000000001",
+				agent,
+				model: "mock/model-a",
+			});
+		expect((await create("listed", "implementer")).type).toBe("session_created");
+		expect((await create("unlisted", "workspace-only")).code).toBe("unknown_agent");
+	});
+
 	it("rejects a relative, missing, file or unreadable workspace with invalid_workspace and creates nothing", async () => {
 		tempDir = TempDir.createSync("@control-workspace-");
 		const mock = makeMock();
