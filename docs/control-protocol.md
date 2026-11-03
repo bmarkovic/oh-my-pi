@@ -10,3 +10,25 @@
 - Handshake: the first command must be `hello`. A proposal with no version 2 is answered with `version_mismatch` and closed with 1002. A silent client is closed with 1008 after 10 seconds.
 - Heartbeat: a ping every 15 seconds. No inbound frame or pong for 45 seconds closes the connection as transport loss.
 - Command ids are unique per connection; a reused id is rejected with `invalid_message` and is not executed.
+
+## Running the daemon
+
+```
+omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
+```
+
+- `--bind` defaults to `127.0.0.1:0` (a free loopback port). Other hosts are refused.
+- Credentials come from `--token-file` or `OMP_CONTROL_TOKEN` (bearer) and `--key-file` or `OMP_CONTROL_KEY` (control key). At least one is required; otherwise the command prints a message on stderr and exits 1.
+- On start, stdout carries exactly one line: the `ws://` URL including `/control`.
+- SIGINT and SIGTERM close the listener and dispose every session before the process exits with the signal's status.
+- The launch's other flags (for example `--approval-mode`) apply to the sessions the daemon creates.
+
+## Catalog and session creation
+
+Advertised features: `catalog`.
+
+- `query_catalog` returns `models` (`{id: "provider/modelId", provider}`) from the process model registry, and `agents` (`{name, description, roles: [], defaultModel?}`) discovered from the daemon's working directory. Prompts and definition paths are never included. `defaultModel` is set only when the agent's first model pattern is exactly a catalog id; looser patterns are omitted rather than guessed. `roles` is empty until agent roles exist.
+- `create_session` needs an accepted `subscribe_events`. `workspacePath` must be an absolute, existing, readable directory (`invalid_workspace` otherwise). `agent` and `model` are exact catalog names and ids (`unknown_agent`, `unknown_model`); an explicit model disables model fallback. Every selection is resolved before anything is created, so a rejected request creates no session.
+- Non-empty `tools` are refused with `unsupported_operation` in this build; tool bindings arrive in a later feature.
+- A session factory failure is answered with `invalid_message` and the message `session could not be created`. The contract has no internal-error code, so this is the closest typed rejection; nothing is retained.
+- Handles are opaque UUIDs owned by the credential that created them. Another credential's lookups read as `unknown_session`.

@@ -2,7 +2,8 @@
  * Command operation table. `defineOperation` owns the shared steps every command
  * performs in order: payload validation, the subscription gate, then the handler.
  */
-import { type Type, OmpErrors } from "@oh-my-pi/omptype";
+import { OmpErrors, type Type } from "@oh-my-pi/omptype";
+import { logger } from "@oh-my-pi/pi-utils";
 import { CONTROL_FEATURES } from "./control-features";
 import type { ControlConnection, ControlOperationHandler } from "./control-connection";
 import { ackFrame, capabilitiesFrame, queryCapabilitiesCommand, subscribeEventsCommand } from "./wire/envelope";
@@ -12,12 +13,16 @@ export interface ControlOperationDefinition<C> {
 	readonly schema: Type<C>;
 	/** Refuse with `unsupported_operation` unless `subscribe_events` was accepted on the connection. */
 	readonly requiresSubscription?: boolean;
-	readonly run: (connection: ControlConnection, id: string, command: C) => void;
+	/**
+	 * Performs the command. A handler that awaits must reject only for failures it
+	 * could not turn into a typed reply; those are logged and answered with `invalid_message`.
+	 */
+	readonly run: (connection: ControlConnection, id: string, command: C) => void | Promise<void>;
 }
 
 /**
  * Build a handler for one command type. A payload that fails its schema is
- * rejected with `invalid_message`; its diagnostic names only the command type,
+ * rejected with `invalid_message` and its diagnostic names only the command type,
  * never payload values, because payloads can carry operator secrets.
  */
 export function defineOperation<C>(definition: ControlOperationDefinition<C>): ControlOperationHandler {
@@ -31,7 +36,13 @@ export function defineOperation<C>(definition: ControlOperationDefinition<C>): C
 			connection.reject("unsupported_operation", "subscribe_events must be accepted before this command", id);
 			return;
 		}
-		definition.run(connection, id, parsed);
+		const outcome = definition.run(connection, id, parsed);
+		if (outcome !== undefined) {
+			outcome.catch((error: unknown) => {
+				logger.error("control command failed", { type: String(raw.type), error: String(error) });
+				connection.reject("invalid_message", `${String(raw.type)} could not be completed`, id);
+			});
+		}
 	};
 }
 

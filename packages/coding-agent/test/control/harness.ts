@@ -4,12 +4,27 @@
  * conforming client cannot produce (unanswered pings, invalid UTF-8 text frames).
  */
 import * as net from "node:net";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	type ControlCatalogSource,
 	type ControlOperationHandler,
+	ControlDaemon,
 	type ControlServerHandle,
 	type ControlServerOptions,
+	type ControlSessionFactory,
+	type ControlSessionRequest,
+	sessionOptionsForAgent,
 	startControlServer,
 } from "@oh-my-pi/pi-coding-agent/modes/control/index";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 
 export const BEARER_TOKEN = "bearer-credential-for-tests";
 export const CONTROL_KEY = "key-credential-for-tests";
@@ -233,4 +248,74 @@ export function readCloseCode(socket: net.Socket, timeoutMs = 2_000): Promise<nu
 	socket.on("close", () => reject(new Error("socket closed without a close frame")));
 	socket.resume();
 	return withTimeout(promise, timeoutMs, "no close frame");
+}
+
+/** A session factory that builds real sessions through `createAgentSession`, driven by one mock model. */
+export interface MockSessionFactory {
+	factory: ControlSessionFactory;
+	/** Every request the daemon made, in order. */
+	requests: ControlSessionRequest[];
+	/** Every session the factory built, in order. */
+	sessions: AgentSession[];
+	cleanup(): Promise<void>;
+}
+
+export async function createMockSessionFactory(mock: MockModel): Promise<MockSessionFactory> {
+	const sourceId = `control-test-${crypto.randomUUID()}`;
+	registerMockApi(sourceId);
+	const authStorage = await AuthStorage.create(":memory:");
+	authStorage.keys.setRuntime(mock.model.provider, "test-key");
+	const modelRegistry = new ModelRegistry(authStorage);
+	const requests: ControlSessionRequest[] = [];
+	const sessions: AgentSession[] = [];
+	const factory: ControlSessionFactory = async request => {
+		requests.push(request);
+		const result = await createAgentSession({
+			...(request.agent ? sessionOptionsForAgent(request.agent) : {}),
+			cwd: request.cwd,
+			model: request.model ?? mock.model,
+			disableModelFallback: request.model !== undefined,
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
+			sessionManager: SessionManager.inMemory(),
+			enableMCP: false,
+			enableLsp: false,
+			disableExtensionDiscovery: true,
+		});
+		sessions.push(result.session);
+		return { session: result.session, setToolUIContext: result.setToolUIContext };
+	};
+	return {
+		factory,
+		requests,
+		sessions,
+		async cleanup() {
+			for (const session of sessions) await session.dispose();
+			authStorage.close();
+			unregisterCustomApis(sourceId);
+		},
+	};
+}
+
+/** A catalog source with fixed models and agents, so tests do not depend on user configuration. */
+export function staticCatalog(models: readonly Model[], agents: readonly AgentDefinition[]): ControlCatalogSource {
+	return { models: () => models, agents: async () => agents };
+}
+
+/** Start a daemon whose operations come from a real `ControlDaemon`. Close it with the returned `dispose`. */
+export async function startDaemonWith(options: {
+	catalog: ControlCatalogSource;
+	createSession: ControlSessionFactory;
+	daemonCwd: string;
+}): Promise<{ server: TestDaemon; dispose(): Promise<void> }> {
+	const control = new ControlDaemon(options);
+	const server = await startTestDaemon({ operations: control.operations() });
+	return {
+		server,
+		async dispose() {
+			await server.close();
+			await control.dispose();
+		},
+	};
 }

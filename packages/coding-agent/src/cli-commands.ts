@@ -38,6 +38,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.acpHelp,
 	},
 	{
+		name: "control",
+		load: () => import("./commands/control").then(m => m.default),
+		help: commandHelp.controlHelp,
+	},
+	{
 		name: "auth",
 		load: () => import("./commands/auth").then(m => m.default),
 		help: commandHelp.authHelp,

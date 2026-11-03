@@ -61,6 +61,7 @@ import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { all, combine, type ProtocolHost, type SettingValueOf } from "./config/registry";
 import { Settings, settings } from "./config/settings";
+import { createControlSessionFactory, createRegistryCatalogSource, runControlServe } from "./modes/control/index";
 import { initializeWithSettings } from "./discovery";
 import {
 	clearPluginRootsAndCaches,
@@ -523,6 +524,20 @@ interface AcpSessionHandle {
 
 type AcpSessionFactory = (cwd: string, options?: { interactivePrompts?: boolean }) => Promise<AcpSessionHandle>;
 
+/** Per-session request of a headless protocol host (ACP, control). */
+export interface HeadlessSessionOptions {
+	interactivePrompts?: boolean;
+	/** Options that override the launch defaults for this one session. */
+	sessionOptions?: Partial<CreateAgentSessionOptions>;
+}
+
+export type HeadlessSessionFactory = (cwd: string, options?: HeadlessSessionOptions) => Promise<AcpSessionHandle>;
+
+export interface HeadlessSessionFactoryOptions extends AcpSessionFactoryOptions {
+	/** Prefix of the session's agent id (`acp`, `control`). */
+	agentIdPrefix: string;
+}
+
 export interface AcpSessionFactoryOptions {
 	baseOptions: CreateAgentSessionOptions;
 	settings: Settings;
@@ -565,10 +580,19 @@ async function loadTrustedSessionExtensions(
  * tool registry and shadow the client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
+	return createHeadlessSessionFactory({ ...args, agentIdPrefix: "acp" });
+}
+
+/**
+ * Build the per-session factory shared by the headless protocol hosts. Each call
+ * gets its own settings clone, session manager and extension bus; only the agent
+ * id prefix and the per-session options differ between hosts.
+ */
+export function createHeadlessSessionFactory(args: HeadlessSessionFactoryOptions): HeadlessSessionFactory {
 	return async (cwd, factoryOptions) => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
-		const agentId = `acp:${nextSessionManager.getSessionId()}`;
+		const agentId = `${args.agentIdPrefix}:${nextSessionManager.getSessionId()}`;
 		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
 		// host can open `session/new` for any client-supplied workspace, so
 		// re-discover `TITLE_SYSTEM.md` against THIS session's `cwd` to keep the
@@ -591,6 +615,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// per that project's `secrets.enabled` regardless of which session holds the effects.
 		const { session: nextSession, setToolUIContext } = await args.createSession({
 			...args.baseOptions,
+			...factoryOptions?.sessionOptions,
 			cwd,
 			sessionManager: nextSessionManager,
 			settings: nextSettings,
@@ -1911,7 +1936,7 @@ export async function runRootCommand(
 		// Classify the host before opening auth or settings storage so every
 		// session-critical database connection picks the right busy timeout.
 		// See getDbBusyTimeoutMs().
-		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
+		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp" || mode === "control";
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
 		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
 		// Without a terminal on stdin the TUI cannot run, so such a launch is always
@@ -1987,7 +2012,7 @@ export async function runRootCommand(
 		if (parsedArgs.maxCost !== undefined) cfgSessionMaxCost.override(settingsInstance, parsedArgs.maxCost);
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyProtocolDefaults("rpc", settingsInstance);
-		} else if (parsedArgs.mode === "acp") {
+		} else if (parsedArgs.mode === "acp" || parsedArgs.mode === "control") {
 			applyProtocolDefaults("acp", settingsInstance);
 		}
 
@@ -2016,7 +2041,8 @@ export async function runRootCommand(
 			parsedArgs.noTitle ||
 			parsedArgs.mode === "rpc" ||
 			parsedArgs.mode === "rpc-ui" ||
-			parsedArgs.mode === "acp"
+			parsedArgs.mode === "acp" ||
+			parsedArgs.mode === "control"
 		) {
 			Bun.env.PI_NO_TITLE = "1";
 		}
@@ -2435,7 +2461,35 @@ export async function runRootCommand(
 			return result;
 		};
 
-		if (mode === "acp") {
+		if (mode === "control") {
+			// The control daemon serves many sessions, one per `create_session`; it never builds the
+			// launch session. The per-session factory is the headless one with agent id prefix `control`.
+			const serveLaunch = parsedArgs.controlServe;
+			if (!serveLaunch) throw new Error("omp control serve launched without serve options");
+			const createHeadlessControlSession = createHeadlessSessionFactory({
+				baseOptions: sessionOptions,
+				settings: settingsInstance,
+				sessionDir: parsedArgs.sessionDir,
+				authStorage,
+				modelRegistry,
+				parsedArgs,
+				rawArgs,
+				createSession,
+				agentIdPrefix: "control",
+			});
+			stopStartupWatchdog();
+			// Startup is over: stop recording spans, or every later session appends to the timing tree.
+			logger.endTiming();
+			await runControlServe({
+				hostname: serveLaunch.hostname,
+				port: serveLaunch.port,
+				bearerToken: serveLaunch.bearerToken,
+				controlKey: serveLaunch.controlKey,
+				catalog: createRegistryCatalogSource(modelRegistry),
+				createSession: createControlSessionFactory(createHeadlessControlSession),
+				daemonCwd: cwd,
+			});
+		} else if (mode === "acp") {
 			// ACP binds extensions per `session/new`, and any of them may own a flag
 			// the bootstrap parse rejected, so pending invalid enum values are
 			// normally settled by the per-session factory. With discovery off and no
