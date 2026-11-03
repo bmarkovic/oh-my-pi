@@ -25,7 +25,7 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 
 ## Catalog and session creation
 
-Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `tool_bindings`.
+Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `tool_bindings`, `decisions`.
 
 - `query_catalog` returns `models` (`{id: "provider/modelId", provider}`) from the process model registry, and `agents` (`{name, description, roles: [], defaultModel?}`) discovered from the daemon's working directory. Prompts and definition paths are never included. `defaultModel` is set only when the agent's first model pattern is exactly a catalog id; looser patterns are omitted rather than guessed. `roles` is empty until agent roles exist.
 - `create_session` needs an accepted `subscribe_events`. `workspacePath` must be an absolute, existing, readable directory (`invalid_workspace` otherwise). `agent` and `model` are exact catalog names and ids (`unknown_agent`, `unknown_model`); an explicit model disables model fallback. Every selection is resolved before anything is created, so a rejected request creates no session.
@@ -62,3 +62,13 @@ Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `
 - Idle `prompt_session.tools` replaces the whole set atomically before the ack. `[]` removes every binding; omitting `tools` keeps the set. During an active turn, `tools` is `invalid_message` and the bindings are unchanged.
 - Each call POSTs the model's JSON input to `endpointUrl` with `Authorization: Bearer <authToken>`. A non-2xx answer is a tool error that names only the status. Response bodies are capped at 16 MiB, and every occurrence of the token in a body is replaced with `[redacted]` before the model sees it. The token never appears in events, logs or errors.
 - Installation goes through the session's host-tool refresh, not the extension loader, so it is atomic and can be replaced at an idle boundary.
+
+## Decisions
+
+- The model's `ask` tool runs in a control session as a decision. `decision_requested{decisionId, question, options, allowFreeText}` carries one `optionId` per choice (`"0"`, `"1"`, …). The ask tool's reserved free-text option arrives as an option too; choosing it asks for text, which is a decision with no options and `allowFreeText: true`.
+- A session has at most one pending decision. The turn waits for the answer; the deadline keeps running, and nothing is chosen automatically.
+- `answer_decision` takes exactly one of `optionId` or `text` (text only when the question allowed it). A malformed answer is `invalid_message` and the question stays pending. An accepted answer is acknowledged, then `decision_answered{decisionId, optionId|text, answeringUserId?}` is published, then the tool continues.
+- An identical answer retried after acceptance gets `ack` with no second event. A different answer, an answer to a settled or invalidated question, a question of another credential, or an unknown id is `invalid_decision_state`.
+- Interrupt, terminate and the deadline invalidate a pending question before the session settles. A deadline while waiting settles the turn as `session_failed{code: "timeout"}`.
+- A multi-select question is refused to the tool, which gets an error instead of a question. Confirmations are denied.
+- Settled decisions are kept for the life of the daemon in this build; the reconciliation feature bounds that record window.

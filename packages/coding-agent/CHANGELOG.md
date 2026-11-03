@@ -9,6 +9,7 @@
 - Control sessions can be soft-interrupted: `interrupt_session` stops the active turn, reports `session_interrupted`, and leaves the session ready for the next prompt
 - Control sessions can be hard-terminated: `terminate_session` disposes the session and reports `session_terminated` once it is gone; a terminated handle rejects further commands
 - Control sessions can call operator-supplied HTTP tools: `create_session` and idle `prompt_session` accept tool bindings, each posting the model's JSON input to its endpoint with a bearer token that is never echoed back to the model
+- Control sessions surface the model's questions to the control client: each `ask` becomes a decision the client answers with `answer_decision`, and the turn waits for the answer within its deadline
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 

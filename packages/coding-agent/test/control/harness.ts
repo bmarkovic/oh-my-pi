@@ -20,6 +20,7 @@ import {
 	sessionOptionsForAgent,
 	startControlServer,
 } from "@oh-my-pi/pi-coding-agent/modes/control/index";
+import { ensureTheme } from "@oh-my-pi/pi-tui/theme";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -261,6 +262,8 @@ export interface MockSessionFactory {
 }
 
 export async function createMockSessionFactory(mock: MockModel): Promise<MockSessionFactory> {
+	// The CLI initializes the theme before any session exists; tools such as `ask` read it.
+	await ensureTheme();
 	const sourceId = `control-test-${crypto.randomUUID()}`;
 	registerMockApi(sourceId);
 	const authStorage = await AuthStorage.create(":memory:");
@@ -282,6 +285,8 @@ export async function createMockSessionFactory(mock: MockModel): Promise<MockSes
 			enableMCP: false,
 			enableLsp: false,
 			disableExtensionDiscovery: true,
+			// Mirrors the control daemon's session options: `ask` is offered, its decisions go to the daemon.
+			interactivePrompts: true,
 		});
 		sessions.push(result.session);
 		return { session: result.session, setToolUIContext: result.setToolUIContext };

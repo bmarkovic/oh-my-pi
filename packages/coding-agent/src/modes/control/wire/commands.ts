@@ -19,6 +19,14 @@ export const createSessionCommand = type({
 	"tools?": "unknown[]",
 });
 
+export const answerDecisionCommand = type({
+	type: "'answer_decision'",
+	decisionId: "/\\S/",
+	"optionId?": "/\\S/",
+	"text?": "/\\S/",
+	"answeringUserId?": "/\\S/",
+});
+
 export const interruptSessionCommand = type({
 	type: "'interrupt_session'",
 	sessionId: "/\\S/",

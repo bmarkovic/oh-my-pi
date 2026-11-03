@@ -9,4 +9,5 @@ export const CONTROL_FEATURES: readonly string[] = [
 	"interrupt",
 	"terminate",
 	"tool_bindings",
+	"decisions",
 ];

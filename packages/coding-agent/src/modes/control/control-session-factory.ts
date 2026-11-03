@@ -40,7 +40,7 @@ export function sessionOptionsForAgent(agent: AgentDefinition): Partial<CreateAg
 /** Opens a headless session for a workspace with per-session options (the headless factory's shape). */
 export type HeadlessSessionOpener = (
 	cwd: string,
-	options: { sessionOptions: Partial<CreateAgentSessionOptions> },
+	options: { sessionOptions: Partial<CreateAgentSessionOptions>; interactivePrompts: boolean },
 ) => Promise<ControlSessionHandle>;
 
 /**
@@ -58,6 +58,7 @@ export function createControlSessionFactory(open: HeadlessSessionOpener): Contro
 		} else if (sessionOptions.modelPattern !== undefined) {
 			sessionOptions.model = undefined;
 		}
-		return open(request.cwd, { sessionOptions });
+		// `ask` is offered only when prompts can reach a human; a control decision is that human.
+		return open(request.cwd, { sessionOptions, interactivePrompts: true });
 	};
 }

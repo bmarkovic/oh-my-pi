@@ -12,12 +12,15 @@ import type { ControlConnection, ControlOperationHandler } from "./control-conne
 import { CONTROL_OPERATIONS, defineOperation } from "./control-operations";
 import { type ControlToolBinding, createEndpointTool, parseToolBindings } from "./control-endpoint-tool";
 import type { ControlSessionFactory, ControlSessionHandle } from "./control-session-factory";
+import { ControlDecisionStore } from "./control-decisions";
+import { createControlExtensionUI } from "./control-ui-context";
 import { ControlSessionRegistry } from "./control-session-registry";
 import { ControlTurnController } from "./control-turn";
 import {
 	type CreateSessionCommand,
 	catalogFrame,
 	createSessionCommand,
+	answerDecisionCommand,
 	interruptSessionCommand,
 	type PromptSessionCommand,
 	promptSessionCommand,
@@ -44,6 +47,7 @@ export class ControlDaemon {
 	readonly #daemonCwd: string;
 	readonly #registry = new ControlSessionRegistry();
 	readonly #turns: ControlTurnController;
+	readonly #decisions: ControlDecisionStore;
 	/** Connections that subscribed; pruned lazily once closed. */
 	readonly #subscribers = new Set<ControlConnection>();
 
@@ -51,7 +55,8 @@ export class ControlDaemon {
 		this.#catalog = options.catalog;
 		this.#createSession = options.createSession;
 		this.#daemonCwd = options.daemonCwd;
-		this.#turns = new ControlTurnController((principal, frame) => this.#publish(principal, frame));
+		this.#decisions = new ControlDecisionStore((principal, frame) => this.#publish(principal, frame));
+		this.#turns = new ControlTurnController((principal, frame) => this.#publish(principal, frame), this.#decisions);
 	}
 
 	/** The command table for this daemon: the base operations plus the session operations. */
@@ -93,6 +98,23 @@ export class ControlDaemon {
 					schema: promptSessionCommand,
 					requiresSubscription: true,
 					run: (connection, id, command) => this.#promptSession(connection, id, command),
+				}),
+			],
+			[
+				"answer_decision",
+				defineOperation({
+					schema: answerDecisionCommand,
+					requiresSubscription: true,
+					run: (connection, id, command) => {
+						const result = this.#decisions.answer(connection.principal, command);
+						if (result.kind === "rejected") {
+							connection.reject(result.code, result.message, id);
+							return;
+						}
+						// Ack before the decision event; the continuation resumes only after that event.
+						connection.reply(ackFrame(id));
+						if (result.kind === "accepted") this.#decisions.release(result.decisionId);
+					},
 				}),
 			],
 			[
@@ -252,6 +274,7 @@ export class ControlDaemon {
 			return;
 		}
 
+		const sessionId = crypto.randomUUID();
 		let handle: ControlSessionHandle;
 		try {
 			handle = await this.#createSession({ cwd: command.workspacePath, agent, model });
@@ -274,7 +297,11 @@ export class ControlDaemon {
 				return;
 			}
 		}
-		const sessionId = crypto.randomUUID();
+		// Questions the session's tools ask a human become decisions owned by this principal.
+		handle.setToolUIContext(
+			createControlExtensionUI({ sessionId, principal: connection.principal, decisions: this.#decisions }),
+			true,
+		);
 		this.#registry.register({
 			sessionId,
 			principal: connection.principal,

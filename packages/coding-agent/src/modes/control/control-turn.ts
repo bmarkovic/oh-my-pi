@@ -7,6 +7,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../../session/agent-session";
 import type { ControlPrincipal } from "./control-auth";
+import type { ControlDecisionStore } from "./control-decisions";
 import type { ControlSessionRecord, ControlTurn, ControlUsageBaseline } from "./control-session-registry";
 import type { ControlEvent, ControlUsage } from "./wire/events";
 
@@ -53,9 +54,11 @@ function assistantText(message: AssistantMessage): string {
 
 export class ControlTurnController {
 	readonly #publish: ControlPublisher;
+	readonly #decisions: ControlDecisionStore;
 
-	constructor(publish: ControlPublisher) {
+	constructor(publish: ControlPublisher, decisions: ControlDecisionStore) {
 		this.#publish = publish;
+		this.#decisions = decisions;
 	}
 
 	/**
@@ -94,9 +97,11 @@ export class ControlTurnController {
 		if (!turn) return false;
 		if (turn.stop !== undefined) return true;
 		turn.stop = "interrupt";
+		// Cancel the work before releasing the human's question, so no next step starts meanwhile.
 		record.session.abort({ reason: "control interrupt" }).catch((error: unknown) => {
 			logger.warn("control interrupt abort failed", { sessionId: record.sessionId, error: String(error) });
 		});
+		this.#decisions.invalidateSession(record.sessionId);
 		return true;
 	}
 
@@ -113,6 +118,7 @@ export class ControlTurnController {
 		record.session.abort({ reason: "control terminate" }).catch((error: unknown) => {
 			logger.warn("control terminate abort failed", { sessionId: record.sessionId, error: String(error) });
 		});
+		this.#decisions.invalidateSession(record.sessionId);
 		return Promise.resolve();
 	}
 
@@ -169,6 +175,7 @@ export class ControlTurnController {
 		record.session.abort({ reason: "control turn deadline" }).catch((error: unknown) => {
 			logger.warn("control turn abort after deadline failed", { sessionId: record.sessionId, error: String(error) });
 		});
+		this.#decisions.invalidateSession(record.sessionId);
 	}
 
 	#settleCompleted(record: ControlSessionRecord, turn: ControlTurn, output: string): void {
@@ -261,6 +268,7 @@ export class ControlTurnController {
 	#settle(record: ControlSessionRecord, turn: ControlTurn, build: () => ControlEvent): void {
 		if (turn.settled) return;
 		turn.settled = true;
+		this.#decisions.invalidateSession(record.sessionId);
 		clearTimeout(turn.deadline);
 		turn.deadline = undefined;
 		if (record.turn === turn) {
