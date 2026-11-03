@@ -45,6 +45,8 @@ export class ControlConnection {
 	readonly #timing: ControlTiming;
 	readonly #operations: ReadonlyMap<string, ControlOperationHandler>;
 	readonly #seenIds = new Set<string>();
+	/** Root sessions whose live events this connection receives (created here, or reclaimed by `reconnect`). */
+	readonly #attached = new Set<string>();
 	#negotiated = false;
 	#subscribed = false;
 	#closed = false;
@@ -87,6 +89,20 @@ export class ControlConnection {
 	/** Mark the connection subscribed. Idempotent. */
 	subscribe(): void {
 		this.#subscribed = true;
+	}
+
+	/** Start delivering a root session's events to this connection. */
+	attach(sessionId: string): void {
+		this.#attached.add(sessionId);
+	}
+
+	/** Stop delivering a root session's events to this connection. */
+	detach(sessionId: string): void {
+		this.#attached.delete(sessionId);
+	}
+
+	isAttached(sessionId: string): boolean {
+		return this.#attached.has(sessionId);
 	}
 
 	/** Send one server frame. Dropped once the connection is closed. */

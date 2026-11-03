@@ -104,7 +104,12 @@ export class TestClient {
 		if (queued) return Promise.resolve(queued);
 		const { promise, resolve } = Promise.withResolvers<Frame>();
 		this.#waiters.push(resolve);
-		return withTimeout(promise, timeoutMs, "timed out waiting for a frame");
+		// A waiter that timed out must not stay queued, or it would swallow the next frame.
+		return withTimeout(promise, timeoutMs, "timed out waiting for a frame").catch((error: unknown) => {
+			const index = this.#waiters.indexOf(resolve);
+			if (index >= 0) this.#waiters.splice(index, 1);
+			throw error;
+		});
 	}
 
 	/** The next frame, asserting that it answers `inReplyTo`. */

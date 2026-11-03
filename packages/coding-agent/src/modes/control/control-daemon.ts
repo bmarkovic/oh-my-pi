@@ -12,7 +12,7 @@ import type { ControlConnection, ControlOperationHandler } from "./control-conne
 import { CONTROL_OPERATIONS, defineOperation } from "./control-operations";
 import { type ControlToolBinding, createEndpointTool, parseToolBindings } from "./control-endpoint-tool";
 import type { ControlSessionFactory, ControlSessionHandle } from "./control-session-factory";
-import type { SubagentUiAssignment, SubagentUiChild, SubagentUiRouter } from "../../task/types";
+import type { SubagentUiAssignment, SubagentUiChild } from "../../task/types";
 import { ControlChildLedger } from "./control-children";
 import { ControlRetention, type ControlRetentionTiming, DEFAULT_RETENTION_TIMING } from "./control-retention";
 import {
@@ -208,7 +208,13 @@ export class ControlDaemon {
 								snapshot,
 							};
 						});
-						// The reply is queued synchronously here, before any later event for these sessions.
+						// Reattach and reply in one synchronous step: the snapshot is queued before any later event
+						// for these sessions, and no other connection of the principal keeps receiving them.
+						for (const result of sessions) {
+							if (result.status === "unknown") continue;
+							for (const other of this.#subscribers) if (other !== connection) other.detach(result.sessionId);
+							connection.attach(result.sessionId);
+						}
 						connection.reply(reconciledFrame(id, sessions));
 					},
 				}),
@@ -333,14 +339,21 @@ export class ControlDaemon {
 		}
 	}
 
-	/** Deliver an event to every subscribed connection of the owning principal. */
+	/**
+	 * Deliver an event to the subscribed connections of the owning principal that are attached to
+	 * its root session. A session whose connection was lost stays detached, and receives no live
+	 * events anywhere, until `reconnect` reclaims it and its snapshot is sent (contract section 2.4).
+	 */
 	#publish(principal: ControlPrincipal, frame: ControlEvent): void {
+		const rootId = frame.parentSessionId ?? frame.sessionId;
 		for (const connection of this.#subscribers) {
 			if (connection.closed) {
 				this.#subscribers.delete(connection);
 				continue;
 			}
-			if (connection.principal === principal && connection.subscribed) connection.reply(frame);
+			if (connection.principal === principal && connection.subscribed && connection.isAttached(rootId)) {
+				connection.reply(frame);
+			}
 		}
 	}
 
@@ -490,6 +503,7 @@ export class ControlDaemon {
 			children: [],
 		});
 		this.#retention.armIdle(sessionId);
+		connection.attach(sessionId);
 		connection.reply(sessionCreatedFrame(id, sessionId));
 	}
 }

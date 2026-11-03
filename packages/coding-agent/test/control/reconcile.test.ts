@@ -164,6 +164,38 @@ describe("control retention and reconciliation", () => {
 		});
 	});
 
+	it("holds a detached session's events back from a subscribed successor until reconnect delivers the snapshot", async () => {
+		const mock = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			responses: [{ content: ["while away"], delayMs: 200 }],
+		});
+		const { opened, dir } = await setup(mock);
+		const sessionId = await createSessionFor(opened.client, dir.path());
+		await opened.client.request({ version: 2, id: "p1", type: "prompt_session", sessionId, prompt: "work" });
+		await nextMatching(opened.client, frame => frame.type === "session_started");
+		opened.client.close();
+
+		const successor = await reconnectingClient(opened.server.url, opened.server.bearerHeaders);
+		await Bun.sleep(500);
+		// The turn settled while the successor was subscribed but had not reconnected: no event may reach it.
+		await expect(successor.next(150)).rejects.toThrow();
+
+		const reconciled = await successor.request({
+			version: 2,
+			id: "r-barrier",
+			type: "reconnect",
+			activeSessions: [{ sessionId, taskRef: "00000000-0000-4000-8000-0000000000aa" }],
+		});
+		const [entry] = reconciled.sessions as Array<Record<string, unknown>>;
+		expect((entry.snapshot as Record<string, unknown>).lastOutcome).toMatchObject({
+			type: "session_completed",
+			output: "while away",
+		});
+		// The outcome is recovered from the snapshot only; it is not delivered a second time as a live event.
+		await expect(successor.next(150)).rejects.toThrow();
+	});
+
 	it("terminates a principal's sessions once its orphan grace runs out, then reports them completed", async () => {
 		const mock = createMockModel({
 			provider: "mock",
