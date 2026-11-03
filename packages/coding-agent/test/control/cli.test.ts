@@ -135,6 +135,119 @@ describe("omp control serve credential files", () => {
 	}, 30_000);
 });
 
+describe("omp control serve TLS flags", () => {
+	const TLS_CERT = path.join(import.meta.dir, "fixtures", "tls", "cert.pem");
+	const TLS_KEY = path.join(import.meta.dir, "fixtures", "tls", "key.pem");
+
+	/** The fixture key with the given mode, in a fresh temp directory (git does not keep 0600). */
+	async function keyWithMode(home: TempDir, mode: number): Promise<string> {
+		const keyFile = path.join(home.path(), "server.key");
+		await Bun.write(keyFile, await Bun.file(TLS_KEY).text());
+		await fs.chmod(keyFile, mode);
+		return keyFile;
+	}
+
+	it("exits 2 when only one of --tls-cert and --tls-key is given", async () => {
+		const home = TempDir.createSync("@control-cli-half-tls-");
+		try {
+			const child = spawnControl(home.path(), { OMP_CONTROL_TOKEN: "tls-cli-token-for-tests" }, [
+				"--tls-cert",
+				TLS_CERT,
+			]);
+			const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+			expect(code).toBe(2);
+			expect(stderr).toContain("must be given together");
+		} finally {
+			await home.remove();
+		}
+	});
+
+	it("exits 1 on a non-loopback bind without TLS, before anything is printed", async () => {
+		const home = TempDir.createSync("@control-cli-plain-remote-");
+		try {
+			const child = spawnControl(home.path(), { OMP_CONTROL_TOKEN: "tls-cli-token-for-tests" }, [
+				"--bind",
+				"0.0.0.0:0",
+			]);
+			const [code, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			expect(code).toBe(1);
+			expect(stdout).toBe("");
+			expect(stderr).toContain("non-loopback");
+		} finally {
+			await home.remove();
+		}
+	});
+
+	it("exits 1 and names the key file when the TLS key is readable by others", async () => {
+		const home = TempDir.createSync("@control-cli-open-key-");
+		try {
+			const keyFile = await keyWithMode(home, 0o644);
+			const child = spawnControl(home.path(), { OMP_CONTROL_TOKEN: "tls-cli-token-for-tests" }, [
+				"--bind",
+				"127.0.0.1:0",
+				"--tls-cert",
+				TLS_CERT,
+				"--tls-key",
+				keyFile,
+			]);
+			const [code, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			expect(code).toBe(1);
+			expect(stdout).toBe("");
+			expect(stderr).toContain(keyFile);
+			expect(stderr).toContain("0644");
+		} finally {
+			await home.remove();
+		}
+	});
+
+	it("exits 1 without printing a URL when the key does not parse", async () => {
+		const home = TempDir.createSync("@control-cli-bad-key-");
+		try {
+			const keyFile = path.join(home.path(), "server.key");
+			await Bun.write(keyFile, "not a private key\n");
+			await fs.chmod(keyFile, 0o600);
+			const child = spawnControl(home.path(), { OMP_CONTROL_TOKEN: "tls-cli-token-for-tests" }, [
+				"--tls-cert",
+				TLS_CERT,
+				"--tls-key",
+				keyFile,
+			]);
+			const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+			expect(code).toBe(1);
+			expect(stdout).toBe("");
+		} finally {
+			await home.remove();
+		}
+	});
+
+	it("announces a wss URL on loopback when the certificate and an owner-only key are given", async () => {
+		const home = TempDir.createSync("@control-cli-tls-");
+		const keyFile = await keyWithMode(home, 0o600);
+		const child = spawnControl(home.path(), { OMP_CONTROL_TOKEN: "tls-cli-token-for-tests" }, [
+			"--tls-cert",
+			TLS_CERT,
+			"--tls-key",
+			keyFile,
+		]);
+		try {
+			const line = await readFirstLine(child);
+			expect(line).toMatch(/^wss:\/\/127\.0\.0\.1:\d+\/control$/);
+		} finally {
+			child.kill("SIGTERM");
+			await child.exited;
+			await home.remove();
+		}
+	}, 30_000);
+});
+
 describe("control credential environment", () => {
 	it("unsets the credential variable once read, so agent-spawned processes cannot inherit it", async () => {
 		const previous = Bun.env.OMP_CONTROL_TOKEN;

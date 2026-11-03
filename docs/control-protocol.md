@@ -4,7 +4,7 @@
 
 ## Front door
 
-- Listener: `ws://127.0.0.1:<port>/control`. Any other path returns 404. Only loopback hosts (`127.0.0.0/8`, `::1`, `localhost`) can be bound; other hosts are refused before listening because remote control requires TLS, which is not available yet.
+- Listener: `ws://127.0.0.1:<port>/control` on loopback (`127.0.0.0/8`, `::1`, `localhost`). Any other path returns 404. A non-loopback host is refused unless TLS is configured, in which case the listener serves `wss://` (see TLS).
 - Credentials: an upgrade must carry exactly one of `Authorization: Bearer <token>` or `X-Omp-Control-Key: <key>`. Missing, both, wrong, or any `token`, `key` or `access_token` query parameter returns HTTP 401 and no WebSocket is opened. Each configured credential is one control principal, and a handle is visible only to the principal that created it. Credential bytes are never logged or sent in a frame.
 - Frames: each message is one UTF-8 JSON object in a text frame, at most 16 MiB. Binary frames close with 1003. Messages above the limit close with 1009.
 - Handshake: the first command must be `hello`. A proposal with no version 2 is answered with `version_mismatch` and closed with 1002. A silent client is closed with 1008 after 10 seconds.
@@ -14,14 +14,21 @@
 ## Running the daemon
 
 ```
-omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
+omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>] [--tls-cert <path> --tls-key <path>]
 ```
 
-- `--bind` defaults to `127.0.0.1:0` (a free loopback port). Other hosts are refused.
+- `--bind` defaults to `127.0.0.1:0` (a free loopback port). Non-loopback hosts need `--tls-cert` and `--tls-key`; wildcard addresses (`0.0.0.0`, `::`) are refused even with TLS.
 - Credentials come from `--token-file` or `OMP_CONTROL_TOKEN` (bearer) and `--key-file` or `OMP_CONTROL_KEY` (control key). At least one is required; otherwise the command prints a message on stderr and exits 1. Credential files must be owner-only (see Credential files).
 - On start, stdout carries exactly one line: the `ws://` URL including `/control`.
 - SIGINT and SIGTERM close the listener and dispose every session before the process exits with the signal's status.
 - The launch's other flags (for example `--approval-mode`) apply to the sessions the daemon creates.
+
+## TLS
+
+- `--tls-cert` and `--tls-key` are given together or not at all; one alone exits 2. The certificate is a PEM chain. The key is a PEM private key that must pass the credential-file rule (owner-only, mode 0600), and it is loaded before listening: an unreadable or unparseable certificate or key exits 1 and nothing is printed.
+- With TLS the listener serves `wss://` and the stdout line is `wss://<bind host>:<port>/control`, with IPv6 hosts bracketed. Plain HTTP requests to that port never complete an upgrade.
+- The daemon does not check the certificate against the bind host. The operator must issue a certificate that covers the host clients dial. A private CA is trusted by the client, not the daemon.
+- Certificate rotation needs a restart. A reverse proxy that terminates TLS in front of a loopback listener is the documented alternative; the daemon then needs no TLS flags.
 
 ## Credential files
 

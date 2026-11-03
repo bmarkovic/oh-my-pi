@@ -30,8 +30,8 @@ export function credentialFileProblem(
 	return `credential file ${file} must be owned by you and not accessible to group or others (mode ${mode}); run chmod 600 ${file}`;
 }
 
-/** Read a credential file: trimmed, non-empty, and only after the permission rule accepts it. */
-export async function readCredentialFile(file: string): Promise<string> {
+/** Throw unless `file` is a regular file that only the daemon's user can read or write (see `credentialFileProblem`). */
+export async function assertPrivateCredentialFile(file: string): Promise<void> {
 	let stats: Stats;
 	try {
 		stats = await fs.stat(file);
@@ -40,9 +40,15 @@ export async function readCredentialFile(file: string): Promise<string> {
 	}
 	if (process.platform === "win32") {
 		logger.debug("control credential file permissions are not checked on Windows", { file });
+		return;
 	}
 	const problem = credentialFileProblem(file, stats, process.platform, process.getuid?.());
 	if (problem !== undefined) throw new Error(problem);
+}
+
+/** Read a credential file: trimmed, non-empty, and only after the permission rule accepts it. */
+export async function readCredentialFile(file: string): Promise<string> {
+	await assertPrivateCredentialFile(file);
 	let text: string;
 	try {
 		text = await Bun.file(file).text();

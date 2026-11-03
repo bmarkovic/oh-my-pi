@@ -8,7 +8,7 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 import type { ControlCatalogSource } from "./control-catalog";
 import { ControlDaemon } from "./control-daemon";
 import type { ControlSessionFactory } from "./control-session-factory";
-import { startControlServer } from "./control-server";
+import { type ControlTlsFiles, startControlServer } from "./control-server";
 
 export interface RunControlServeOptions {
 	hostname: string;
@@ -17,6 +17,7 @@ export interface RunControlServeOptions {
 	controlKeyFile?: string;
 	bearerToken?: string;
 	controlKey?: string;
+	tls?: ControlTlsFiles;
 	catalog: ControlCatalogSource;
 	createSession: ControlSessionFactory;
 	daemonCwd: string;
@@ -32,6 +33,7 @@ export async function runControlServe(options: RunControlServeOptions): Promise<
 		hostname: options.hostname,
 		port: options.port,
 		credentialFiles: { bearerTokenFile: options.bearerTokenFile, controlKeyFile: options.controlKeyFile },
+		tls: options.tls,
 		bearerToken: options.bearerToken,
 		controlKey: options.controlKey,
 		operations: daemon.operations(),

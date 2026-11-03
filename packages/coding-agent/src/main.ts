@@ -2489,6 +2489,7 @@ export async function runRootCommand(
 				controlKeyFile: serveLaunch.controlKeyFile,
 				bearerToken: serveLaunch.bearerToken,
 				controlKey: serveLaunch.controlKey,
+				tls: serveLaunch.tls,
 				catalog: createRegistryCatalogSource(modelRegistry),
 				createSession: createControlSessionFactory(createHeadlessControlSession),
 				daemonCwd: cwd,

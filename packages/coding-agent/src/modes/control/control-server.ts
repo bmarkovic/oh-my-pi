@@ -35,8 +35,10 @@ export interface ControlServerOptions extends ControlCredentials {
 	credentialFiles?: ControlCredentialFiles;
 	/** Stat-poll interval for `credentialFiles`; defaults to `DEFAULT_CREDENTIAL_POLL_MS`. */
 	credentialPollMs?: number;
-	/** Loopback host to bind. Defaults to `127.0.0.1`; any other host is refused. */
+	/** Host to bind. Defaults to `127.0.0.1`; other hosts need `tls`, and wildcard addresses are refused (see `bindPolicy`). */
 	hostname?: string;
+	/** Terminate TLS with these files, serving `wss://`. Absent means plain `ws://`. */
+	tls?: ControlTlsFiles;
 	/** Port to bind; `0` picks a free port. */
 	port?: number;
 	/** Deadline overrides; defaults follow the shared wire profile. */
@@ -66,13 +68,32 @@ export function isLoopbackHost(host: string): boolean {
 	return match !== null && match.slice(1).every(octet => Number(octet) <= 255);
 }
 
+const WILDCARD_HOSTS: ReadonlySet<string> = new Set(["", "0.0.0.0", "::"]);
+
+/**
+ * Why the listener may not bind `hostname`, or `undefined` when it may. Loopback is allowed with or
+ * without TLS. Other hosts need TLS. Wildcard addresses are refused even with TLS: the printed URL must
+ * name a host that a client can dial and that the certificate can cover, and a wildcard is neither.
+ */
+export function bindPolicy(hostname: string, tls: boolean): string | undefined {
+	if (isLoopbackHost(hostname)) return undefined;
+	if (!tls) return `--bind ${hostname} is a non-loopback address; pass --tls-cert and --tls-key`;
+	if (WILDCARD_HOSTS.has(hostname)) {
+		return `--bind ${hostname} is a wildcard address; bind a specific interface address or host name so the printed URL can be dialed and its certificate checked`;
+	}
+	return undefined;
+}
+
+/** PEM files that terminate TLS on the listener. Loaded before listening; the key must be owner-only. */
+export interface ControlTlsFiles {
+	certFile: string;
+	keyFile: string;
+}
+
 export async function startControlServer(options: ControlServerOptions): Promise<ControlServerHandle> {
 	const hostname = options.hostname ?? "127.0.0.1";
-	if (!isLoopbackHost(hostname)) {
-		throw new Error(
-			`control server refuses non-loopback bind ${hostname}: remote control requires TLS, which is not available yet`,
-		);
-	}
+	const bindProblem = bindPolicy(hostname, options.tls !== undefined);
+	if (bindProblem !== undefined) throw new Error(`control server refuses to start: ${bindProblem}`);
 	const files = options.credentialFiles;
 	const watch =
 		files !== undefined && (files.bearerTokenFile !== undefined || files.controlKeyFile !== undefined)
@@ -94,9 +115,11 @@ export async function startControlServer(options: ControlServerOptions): Promise
 	const onConnection = options.onConnection;
 	const connections = new Set<ControlConnection>();
 
+	const tls = options.tls ? { cert: Bun.file(options.tls.certFile), key: Bun.file(options.tls.keyFile) } : undefined;
 	const server = Bun.serve<ControlSocketData>({
 		hostname,
 		port: options.port ?? 0,
+		tls,
 		fetch(request, bunServer) {
 			if (new URL(request.url).pathname !== CONTROL_PATH) return new Response("Not found", { status: 404 });
 			const principal = authenticateControlRequest(request, credentials());
@@ -147,8 +170,8 @@ export async function startControlServer(options: ControlServerOptions): Promise
 
 	watch?.start();
 	const host = hostname.includes(":") ? `[${hostname}]` : hostname;
-	const url = `ws://${host}:${server.port}${CONTROL_PATH}`;
-	logger.debug("control listener started", { port: server.port, hostname });
+	const url = `${tls ? "wss" : "ws"}://${host}:${server.port}${CONTROL_PATH}`;
+	logger.debug("control listener started", { port: server.port, hostname, tls: tls !== undefined });
 
 	return {
 		url,

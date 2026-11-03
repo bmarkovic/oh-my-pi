@@ -33,6 +33,8 @@ export interface ControlServeLaunch {
 	/** Credentials from the environment, fixed for the process lifetime. */
 	bearerToken?: string;
 	controlKey?: string;
+	/** TLS certificate chain and key; the daemon serves `wss://` when set. */
+	tls?: { certFile: string; keyFile: string };
 }
 
 export interface Args {
