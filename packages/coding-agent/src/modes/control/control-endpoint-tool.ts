@@ -86,6 +86,8 @@ export function createEndpointTool(binding: ControlToolBinding): AgentTool {
 						Authorization: `Bearer ${binding.authToken}`,
 					},
 					body: JSON.stringify(params ?? {}),
+					// A redirect would replay the bearer token against a host the operator never named.
+					redirect: "error",
 					signal,
 				});
 			} catch {

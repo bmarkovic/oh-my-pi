@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { readCredential } from "../../src/commands/control";
 import { connectClient, handshake } from "./harness";
 
 const CLI = path.resolve(import.meta.dir, "../../src/cli.ts");
@@ -79,4 +80,18 @@ describe("omp control serve", () => {
 			await home.remove();
 		}
 	}, 30_000);
+});
+
+describe("control credential environment", () => {
+	it("unsets the credential variable once read, so agent-spawned processes cannot inherit it", async () => {
+		const previous = Bun.env.OMP_CONTROL_TOKEN;
+		Bun.env.OMP_CONTROL_TOKEN = "env-credential-for-tests";
+		try {
+			expect(await readCredential(undefined, "OMP_CONTROL_TOKEN")).toBe("env-credential-for-tests");
+			expect(Bun.env.OMP_CONTROL_TOKEN).toBeUndefined();
+		} finally {
+			if (previous === undefined) delete Bun.env.OMP_CONTROL_TOKEN;
+			else Bun.env.OMP_CONTROL_TOKEN = previous;
+		}
+	});
 });

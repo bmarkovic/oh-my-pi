@@ -108,21 +108,22 @@ export function parseBind(value: string): { hostname: string; port: number } | u
 	return { hostname, port };
 }
 
-/** A credential from a file (trimmed, must be non-empty) or else from its environment variable. */
-async function readCredential(file: string | undefined, envName: string): Promise<string | undefined> {
-	if (file !== undefined) {
-		let text: string;
-		try {
-			text = await Bun.file(file).text();
-		} catch {
-			throw new Error(`cannot read credential file: ${file}`);
-		}
-		const value = text.trim();
-		if (value.length === 0) throw new Error(`credential file is empty: ${file}`);
-		return value;
-	}
+/** A credential from a file (trimmed, must be non-empty) or else from its environment variable, which is then unset. */
+export async function readCredential(file: string | undefined, envName: string): Promise<string | undefined> {
 	const fromEnv = Bun.env[envName]?.trim();
-	return fromEnv ? fromEnv : undefined;
+	// The daemon's credential must not reach agent-spawned processes (bash tool, MCP stdio servers),
+	// which inherit this process's environment: contract section 6 keeps control secrets from agents.
+	delete Bun.env[envName];
+	if (file === undefined) return fromEnv ? fromEnv : undefined;
+	let text: string;
+	try {
+		text = await Bun.file(file).text();
+	} catch {
+		throw new Error(`cannot read credential file: ${file}`);
+	}
+	const value = text.trim();
+	if (value.length === 0) throw new Error(`credential file is empty: ${file}`);
+	return value;
 }
 
 /** Remove the subcommand action and this subcommand's flags from argv, keeping everything else. */
