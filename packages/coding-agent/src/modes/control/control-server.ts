@@ -10,13 +10,22 @@ import {
 	type ControlPrincipal,
 	validateControlCredentials,
 } from "./control-auth";
-import { ControlConnection, type ControlOperationHandler, type ControlTiming } from "./control-connection";
+import {
+	ControlConnection,
+	type ControlOperationHandler,
+	type ControlOutboundLimits,
+	DEFAULT_OUTBOUND_LIMITS,
+	type ControlTiming,
+} from "./control-connection";
 import { type ControlCredentialFiles, ControlCredentialWatch } from "./control-credential-file";
 import { CONTROL_OPERATIONS } from "./control-operations";
 import { CONTROL_MAX_MESSAGE_BYTES } from "./wire/envelope";
 
 /** The only path the control protocol is served on. */
 export const CONTROL_PATH = "/control";
+
+/** Headroom above the high-water mark and one maximum frame, so Bun's backpressure limit is never reached. */
+const CONTROL_BACKPRESSURE_SLACK_BYTES = 1_048_576;
 
 /** How often credential files are stat-polled for rotation. */
 export const DEFAULT_CREDENTIAL_POLL_MS = 2_000;
@@ -45,6 +54,8 @@ export interface ControlServerOptions extends ControlCredentials {
 	timing?: Partial<ControlTiming>;
 	/** Command table; defaults to the operations available on this build. */
 	operations?: ReadonlyMap<string, ControlOperationHandler>;
+	/** Outbound flow-control bounds; defaults follow `DEFAULT_OUTBOUND_LIMITS`. */
+	outbound?: Partial<ControlOutboundLimits>;
 	/** Told when an authenticated connection opens or closes, for the owner's orphan clock. */
 	onConnection?: (principal: ControlPrincipal, opened: boolean) => void;
 }
@@ -111,6 +122,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 	};
 	validateControlCredentials(credentials());
 	const timing: ControlTiming = { ...DEFAULT_TIMING, ...options.timing };
+	const outbound: ControlOutboundLimits = { ...DEFAULT_OUTBOUND_LIMITS, ...options.outbound };
 	const operations = options.operations ?? CONTROL_OPERATIONS;
 	const onConnection = options.onConnection;
 	const connections = new Set<ControlConnection>();
@@ -129,12 +141,17 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		},
 		websocket: {
 			maxPayloadLength: CONTROL_MAX_MESSAGE_BYTES,
+			// The connection sends only while the transport holds at most the high-water mark, so this limit is
+			// never reached; it is sized above that mark plus one maximum frame so the transport never drops a frame.
+			backpressureLimit: outbound.highWaterBytes + CONTROL_MAX_MESSAGE_BYTES + CONTROL_BACKPRESSURE_SLACK_BYTES,
+			closeOnBackpressureLimit: false,
 			// Heartbeat is owned by ControlConnection so the liveness window is ours to configure.
 			sendPings: false,
 			open(ws) {
 				const connection = new ControlConnection({
 					socket: {
 						send: text => ws.send(text),
+						bufferedAmount: () => ws.getBufferedAmount(),
 						close: (code, reason) => ws.close(code, reason),
 						ping: () => ws.ping(),
 						terminate: () => ws.terminate(),
@@ -142,11 +159,15 @@ export async function startControlServer(options: ControlServerOptions): Promise
 					principal: ws.data.principal,
 					timing,
 					operations,
+					outbound,
 				});
 				ws.data.connection = connection;
 				connections.add(connection);
 				connection.start();
 				onConnection?.(ws.data.principal, true);
+			},
+			drain(ws) {
+				ws.data.connection?.flush();
 			},
 			message(ws, message) {
 				if (typeof message !== "string") {

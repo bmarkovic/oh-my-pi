@@ -9,13 +9,31 @@ import type { ControlPrincipal } from "./control-auth";
 import { CONTROL_PROTOCOL_VERSION, helloCommand, isPlainObject, welcomeFrame } from "./wire/envelope";
 import { type ControlErrorCode, controlError } from "./wire/errors";
 
-/** The transport surface a connection needs. The server adapts a Bun WebSocket to it. */
+/**
+ * The transport surface a connection needs. The server adapts a Bun WebSocket to it. `send` returns the
+ * transport's status: bytes written, `-1` when the transport queued the frame, `0` when the socket is gone.
+ */
 export interface ControlSocket {
-	send(text: string): void;
+	send(text: string): number;
+	/** Bytes the transport has accepted but not yet written to the peer. */
+	bufferedAmount(): number;
 	close(code: number, reason: string): void;
 	ping(): void;
 	terminate(): void;
 }
+
+/** Outbound flow-control bounds. Frames are queued past the high-water mark and bounded by the queue limit. */
+export interface ControlOutboundLimits {
+	/** Send directly only while the transport holds at most this many bytes. */
+	highWaterBytes: number;
+	/** UTF-8 bytes of frames the connection may queue. Overflow closes the connection with 1013. */
+	queueLimitBytes: number;
+}
+
+export const DEFAULT_OUTBOUND_LIMITS: ControlOutboundLimits = {
+	highWaterBytes: 1_048_576,
+	queueLimitBytes: 67_108_864,
+};
 
 /** Protocol deadlines in milliseconds (contract section 2.2 and the shared wire profile). */
 export interface ControlTiming {
@@ -32,18 +50,27 @@ export interface ControlConnectionOptions {
 	principal: ControlPrincipal;
 	timing: ControlTiming;
 	operations: ReadonlyMap<string, ControlOperationHandler>;
+	outbound?: Partial<ControlOutboundLimits>;
 }
 
 /** Close codes used by the daemon (RFC 6455 section 7.4.1). */
 const CLOSE_PROTOCOL_ERROR = 1002;
 const CLOSE_POLICY_VIOLATION = 1008;
 const CLOSE_GOING_AWAY = 1001;
+/** IANA "Try Again Later": transient transport loss, the peer should reconnect. */
+const CLOSE_TRY_AGAIN_LATER = 1013;
+/** How long a closing connection may take to complete its close handshake before the socket is torn down. */
+const CLOSE_GRACE_MS = 2_000;
 
 export class ControlConnection {
 	readonly principal: ControlPrincipal;
 	readonly #socket: ControlSocket;
 	readonly #timing: ControlTiming;
 	readonly #operations: ReadonlyMap<string, ControlOperationHandler>;
+	readonly #outboundLimits: ControlOutboundLimits;
+	/** Serialized frames waiting for the transport, in send order. Replies and events share this queue. */
+	readonly #outbound: string[] = [];
+	#outboundBytes = 0;
 	readonly #seenIds = new Set<string>();
 	/** Root sessions whose live events this connection receives (created here, or reclaimed by `reconnect`). */
 	readonly #attached = new Set<string>();
@@ -53,12 +80,19 @@ export class ControlConnection {
 	#lastInboundAt = performance.now();
 	#helloTimer: Timer | undefined;
 	#heartbeatTimer: Timer | undefined;
+	#closeTimer: Timer | undefined;
 
 	constructor(options: ControlConnectionOptions) {
 		this.principal = options.principal;
 		this.#socket = options.socket;
 		this.#timing = options.timing;
 		this.#operations = options.operations;
+		this.#outboundLimits = { ...DEFAULT_OUTBOUND_LIMITS, ...options.outbound };
+	}
+
+	/** True while frames wait for the transport. Pings are not queued, so the heartbeat skips them meanwhile. */
+	get congested(): boolean {
+		return this.#outbound.length > 0 || this.#socket.bufferedAmount() > this.#outboundLimits.highWaterBytes;
 	}
 
 	get negotiated(): boolean {
@@ -105,10 +139,55 @@ export class ControlConnection {
 		return this.#attached.has(sessionId);
 	}
 
-	/** Send one server frame. Dropped once the connection is closed. */
+	/** Send one server frame, in order behind any frame still queued. Dropped once the connection is closed. */
 	reply(frame: object): void {
 		if (this.#closed) return;
-		this.#socket.send(JSON.stringify(frame));
+		this.#enqueue(JSON.stringify(frame));
+	}
+
+	/**
+	 * Send queued frames while the transport has room. The server calls this when the transport reports
+	 * that its buffer drained.
+	 */
+	flush(): void {
+		while (
+			!this.#closed &&
+			this.#outbound.length > 0 &&
+			this.#socket.bufferedAmount() <= this.#outboundLimits.highWaterBytes
+		) {
+			const text = this.#outbound.shift();
+			if (text === undefined) return;
+			this.#outboundBytes -= Buffer.byteLength(text, "utf8");
+			this.#transmit(text);
+		}
+	}
+
+	#enqueue(text: string): void {
+		if (this.#outbound.length === 0 && this.#socket.bufferedAmount() <= this.#outboundLimits.highWaterBytes) {
+			this.#transmit(text);
+			return;
+		}
+		const bytes = Buffer.byteLength(text, "utf8");
+		if (this.#outboundBytes + bytes > this.#outboundLimits.queueLimitBytes) {
+			// The peer cannot keep up. Nothing after the delivered prefix is sent; the client reconnects and reconciles.
+			logger.warn("control connection outbound backlog exceeded", { principal: this.principal });
+			this.#outbound.length = 0;
+			this.#outboundBytes = 0;
+			this.#fail(CLOSE_TRY_AGAIN_LATER, "outbound backlog exceeded");
+			return;
+		}
+		this.#outbound.push(text);
+		this.#outboundBytes += bytes;
+	}
+
+	#transmit(text: string): void {
+		if (this.#socket.send(text) !== 0) return;
+		// Status 0 means the socket is gone: nothing more can be delivered on it.
+		this.#closed = true;
+		this.#outbound.length = 0;
+		this.#outboundBytes = 0;
+		this.#clearTimers();
+		this.#socket.terminate();
 	}
 
 	/** Reject one command with a typed error. Uncorrelated when `inReplyTo` is absent. */
@@ -120,6 +199,8 @@ export class ControlConnection {
 	dispose(): void {
 		this.#closed = true;
 		this.#clearTimers();
+		clearTimeout(this.#closeTimer);
+		this.#closeTimer = undefined;
 	}
 
 	/** Process one inbound text message. */
@@ -220,6 +301,7 @@ export class ControlConnection {
 			this.#socket.terminate();
 			return;
 		}
+		if (this.congested) return;
 		this.#socket.ping();
 	}
 
@@ -228,6 +310,8 @@ export class ControlConnection {
 		this.#closed = true;
 		this.#clearTimers();
 		this.#socket.close(code, reason);
+		// If the close handshake never completes, the transport must not stay open past the grace period.
+		this.#closeTimer = setTimeout(() => this.#socket.terminate(), CLOSE_GRACE_MS);
 	}
 
 	/** Close during server shutdown. */
