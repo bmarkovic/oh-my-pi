@@ -1,31 +1,32 @@
 /**
- * The daemon's state and the operations that create and describe sessions. One
- * daemon serves every principal; the registry keeps each handle principal-owned.
+ * The daemon's state and every operation a control client can run. One daemon
+ * serves every principal; the registry keeps each handle owned by its principal.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import { buildControlCatalog, catalogModelId, type ControlCatalogSource } from "./control-catalog";
+import { buildControlCatalog, type ControlCatalogSource, catalogModelId } from "./control-catalog";
 import type { ControlPrincipal } from "./control-auth";
 import type { ControlConnection, ControlOperationHandler } from "./control-connection";
 import { CONTROL_OPERATIONS, defineOperation } from "./control-operations";
+import { type ControlToolBinding, createEndpointTool, parseToolBindings } from "./control-endpoint-tool";
 import type { ControlSessionFactory, ControlSessionHandle } from "./control-session-factory";
 import { ControlSessionRegistry } from "./control-session-registry";
 import { ControlTurnController } from "./control-turn";
-import { ackFrame, subscribeEventsCommand } from "./wire/envelope";
-import type { ControlEvent } from "./wire/events";
 import {
 	type CreateSessionCommand,
 	catalogFrame,
 	createSessionCommand,
+	interruptSessionCommand,
 	type PromptSessionCommand,
 	promptSessionCommand,
-	interruptSessionCommand,
-	terminateSessionCommand,
 	queryCatalogCommand,
 	sessionCreatedFrame,
+	terminateSessionCommand,
 } from "./wire/commands";
+import { ackFrame, subscribeEventsCommand } from "./wire/envelope";
+import type { ControlEvent } from "./wire/events";
 
 /** Turn budget when `create_session` omits `timeoutMs` (contract section 2.2). */
 export const DEFAULT_TURN_TIMEOUT_MS = 1_800_000;
@@ -69,23 +70,29 @@ export class ControlDaemon {
 				}),
 			],
 			[
-				"terminate_session",
+				"query_catalog",
 				defineOperation({
-					schema: terminateSessionCommand,
-					requiresSubscription: true,
-					run: (connection, id, command) => {
-						const record = this.#registry.lookup(connection.principal, command.sessionId);
-						if (!record) {
-							connection.reject("unknown_session", "session is not retained", id);
-							return;
-						}
-						if (record.state === "terminated") {
-							connection.reject("unsupported_operation", "session has already been terminated", id);
-							return;
-						}
-						connection.reply(ackFrame(id));
-						void this.#turns.terminate(record);
+					schema: queryCatalogCommand,
+					run: async (connection, id) => {
+						const catalog = await buildControlCatalog(this.#catalog, this.#daemonCwd);
+						connection.reply(catalogFrame(id, catalog));
 					},
+				}),
+			],
+			[
+				"create_session",
+				defineOperation({
+					schema: createSessionCommand,
+					requiresSubscription: true,
+					run: (connection, id, command) => this.#createSessionFor(connection, id, command),
+				}),
+			],
+			[
+				"prompt_session",
+				defineOperation({
+					schema: promptSessionCommand,
+					requiresSubscription: true,
+					run: (connection, id, command) => this.#promptSession(connection, id, command),
 				}),
 			],
 			[
@@ -110,29 +117,23 @@ export class ControlDaemon {
 				}),
 			],
 			[
-				"prompt_session",
+				"terminate_session",
 				defineOperation({
-					schema: promptSessionCommand,
+					schema: terminateSessionCommand,
 					requiresSubscription: true,
-					run: (connection, id, command) => this.#promptSession(connection, id, command),
-				}),
-			],
-			[
-				"query_catalog",
-				defineOperation({
-					schema: queryCatalogCommand,
-					run: async (connection, id) => {
-						const catalog = await buildControlCatalog(this.#catalog, this.#daemonCwd);
-						connection.reply(catalogFrame(id, catalog));
+					run: (connection, id, command) => {
+						const record = this.#registry.lookup(connection.principal, command.sessionId);
+						if (!record) {
+							connection.reject("unknown_session", "session is not retained", id);
+							return;
+						}
+						if (record.state === "terminated") {
+							connection.reject("unsupported_operation", "session has already been terminated", id);
+							return;
+						}
+						connection.reply(ackFrame(id));
+						void this.#turns.terminate(record);
 					},
-				}),
-			],
-			[
-				"create_session",
-				defineOperation({
-					schema: createSessionCommand,
-					requiresSubscription: true,
-					run: (connection, id, command) => this.#createSessionFor(connection, id, command),
 				}),
 			],
 		]);
@@ -154,6 +155,13 @@ export class ControlDaemon {
 		}
 	}
 
+	/** Run one prompt-class command after every earlier command on the same session. */
+	#inLane(record: { lane: Promise<void> }, task: () => Promise<void>): Promise<void> {
+		const run = record.lane.then(task);
+		record.lane = run.catch(() => undefined);
+		return run;
+	}
+
 	async #promptSession(connection: ControlConnection, id: string, command: PromptSessionCommand): Promise<void> {
 		const record = this.#registry.lookup(connection.principal, command.sessionId);
 		if (!record) {
@@ -164,23 +172,46 @@ export class ControlDaemon {
 			connection.reject("unsupported_operation", "session has already been terminated", id);
 			return;
 		}
-		if (command.tools !== undefined && command.tools.length > 0) {
-			connection.reject("unsupported_operation", "tool bindings are not supported by this build", id);
-			return;
-		}
-		if (record.turn !== undefined) {
-			try {
-				await this.#turns.steer(record, command.prompt);
-			} catch (error) {
-				connection.reject("unsupported_operation", `steering was refused: ${String(error)}`, id);
+		await this.#inLane(record, async () => {
+			if (command.tools !== undefined) {
+				if (record.turn !== undefined) {
+					connection.reject("invalid_message", "tool bindings cannot change during an active turn", id);
+					return;
+				}
+				let bindings: ControlToolBinding[];
+				try {
+					bindings = parseToolBindings(command.tools);
+				} catch (error) {
+					connection.reject("invalid_message", describeValidation(error), id);
+					return;
+				}
+				try {
+					// Atomic: the replacement is validated whole before any binding is installed.
+					await record.session.refreshRpcHostTools(bindings.map(createEndpointTool));
+				} catch (error) {
+					connection.reject(
+						"invalid_message",
+						`tool bindings could not be installed: ${describeValidation(error)}`,
+						id,
+					);
+					return;
+				}
+				record.tools = bindings;
+			}
+			if (record.turn !== undefined) {
+				try {
+					await this.#turns.steer(record, command.prompt);
+				} catch (error) {
+					connection.reject("unsupported_operation", `steering was refused: ${String(error)}`, id);
+					return;
+				}
+				connection.reply(ackFrame(id));
 				return;
 			}
+			// Ack first: the turn starts synchronously after it, so no await separates the state change from the ack.
 			connection.reply(ackFrame(id));
-			return;
-		}
-		// Ack first: the turn starts synchronously after it, so no await separates the state change from the ack.
-		connection.reply(ackFrame(id));
-		this.#turns.start(record, command.prompt, command.operatorUserId);
+			this.#turns.start(record, command.prompt, command.operatorUserId);
+		});
 	}
 
 	async #createSessionFor(connection: ControlConnection, id: string, command: CreateSessionCommand): Promise<void> {
@@ -193,9 +224,14 @@ export class ControlDaemon {
 			connection.reject("invalid_message", "timeoutMs must be a positive safe integer", id);
 			return;
 		}
-		if (command.tools !== undefined && command.tools.length > 0) {
-			connection.reject("unsupported_operation", "tool bindings are not supported by this build", id);
-			return;
+		let bindings: ControlToolBinding[] = [];
+		if (command.tools !== undefined) {
+			try {
+				bindings = parseToolBindings(command.tools);
+			} catch (error) {
+				connection.reject("invalid_message", describeValidation(error), id);
+				return;
+			}
 		}
 
 		// Resolve every selection before any side effect, so a bad selection creates nothing.
@@ -224,6 +260,20 @@ export class ControlDaemon {
 			connection.reject("invalid_message", "session could not be created", id);
 			return;
 		}
+		if (bindings.length > 0) {
+			try {
+				await handle.session.refreshRpcHostTools(bindings.map(createEndpointTool));
+			} catch (error) {
+				logger.warn("control tool bindings could not be installed", { error: String(error) });
+				await handle.session.dispose().catch(() => undefined);
+				connection.reject(
+					"invalid_message",
+					`tool bindings could not be installed: ${describeValidation(error)}`,
+					id,
+				);
+				return;
+			}
+		}
 		const sessionId = crypto.randomUUID();
 		this.#registry.register({
 			sessionId,
@@ -232,9 +282,16 @@ export class ControlDaemon {
 			timeoutMs,
 			state: "idle",
 			session: handle.session,
+			tools: bindings,
+			lane: Promise.resolve(),
 		});
 		connection.reply(sessionCreatedFrame(id, sessionId));
 	}
+}
+
+/** Describe a validation failure without echoing values: binding errors name fields only. */
+function describeValidation(error: unknown): string {
+	return error instanceof Error && error.message.length > 0 ? error.message : "invalid tool bindings";
 }
 
 /** True when `target` is an existing directory the daemon can read. */

@@ -6,6 +6,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../../session/agent-session";
 import type { ControlPrincipal } from "./control-auth";
+import type { ControlToolBinding } from "./control-endpoint-tool";
 
 /** Lifecycle state of a retained handle (contract section 5). */
 export type ControlSessionState = "idle" | "active" | "terminated" | "expired";
@@ -41,6 +42,10 @@ export interface ControlSessionRecord {
 	readonly session: AgentSession;
 	/** Present while a turn is accepted and unsettled. */
 	turn?: ControlTurn;
+	/** Tool bindings currently installed on the session (empty when none). */
+	tools: ControlToolBinding[];
+	/** Serializes prompt commands on this session, so a tool replacement never races a turn start. */
+	lane: Promise<void>;
 }
 
 export class ControlSessionRegistry {

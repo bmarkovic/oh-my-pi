@@ -25,11 +25,11 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 
 ## Catalog and session creation
 
-Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`.
+Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `tool_bindings`.
 
 - `query_catalog` returns `models` (`{id: "provider/modelId", provider}`) from the process model registry, and `agents` (`{name, description, roles: [], defaultModel?}`) discovered from the daemon's working directory. Prompts and definition paths are never included. `defaultModel` is set only when the agent's first model pattern is exactly a catalog id; looser patterns are omitted rather than guessed. `roles` is empty until agent roles exist.
 - `create_session` needs an accepted `subscribe_events`. `workspacePath` must be an absolute, existing, readable directory (`invalid_workspace` otherwise). `agent` and `model` are exact catalog names and ids (`unknown_agent`, `unknown_model`); an explicit model disables model fallback. Every selection is resolved before anything is created, so a rejected request creates no session.
-- Non-empty `tools` are refused with `unsupported_operation` in this build; tool bindings arrive in a later feature.
+- `tools` binds operator endpoints as model tools (see Tool bindings). A malformed set is `invalid_message` and installs nothing.
 - A session factory failure is answered with `invalid_message` and the message `session could not be created`. The contract has no internal-error code, so this is the closest typed rejection; nothing is retained.
 - Handles are opaque UUIDs owned by the credential that created them. Another credential's lookups read as `unknown_session`.
 
@@ -40,7 +40,6 @@ Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`.
 - Each accepted turn settles exactly once: `session_completed{output}` with the final assistant text (empty when the turn produced no assistant output), or `session_failed{code, error}` with `code` `execution_failed` (model error or an aborted run) or `timeout` (the deadline fired; the turn is aborted first). The turn is settled only after the session is quiet, so a steer queued before the run began is part of the same turn.
 - `usage` is the session's own turn delta of provider-reported input, output and total tokens. It is omitted when the provider reported no tokens for the turn.
 - `operatorUserId` is recorded on the turn and never used for authorization.
-- Non-empty `tools` on `prompt_session` are refused with `unsupported_operation` in this build.
 - `prompt_session` requires an accepted `subscribe_events`; a subscribed connection receives the events of the sessions its credential owns.
 
 ## Interrupt
@@ -55,3 +54,11 @@ Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`.
 - `terminate_session` acknowledges, then disposes the session. On an idle session `session_terminated` follows the teardown and carries no usage. On an active session the turn's only outcome is `session_terminated{usage?}`: a hard stop overrides an interrupt or deadline already in progress, and no completed, failed or interrupted event is sent for that turn.
 - The event is published only after the session is disposed. If teardown fails, nothing is confirmed: an active turn settles as `session_failed{code: "teardown_failed"}` and the handle is left as it was, so a later `terminate_session` can retry.
 - A terminated handle is kept as a tombstone. `prompt_session`, `interrupt_session` and `terminate_session` on it return `unsupported_operation`. Tombstones are retained until the reconciliation feature forgets them.
+
+## Tool bindings
+
+- A binding is `{name, description, endpointUrl, authToken, schema}`. Names are unique, `endpointUrl` is an absolute http(s) URL, `authToken` is non-empty, and `schema` is a JSON Schema object the daemon can represent. Any violation is `invalid_message` naming the field and index only; no binding is installed.
+- `create_session.tools` installs the set once the session exists, before the handle is returned. A failed install disposes the new session and creates nothing.
+- Idle `prompt_session.tools` replaces the whole set atomically before the ack. `[]` removes every binding; omitting `tools` keeps the set. During an active turn, `tools` is `invalid_message` and the bindings are unchanged.
+- Each call POSTs the model's JSON input to `endpointUrl` with `Authorization: Bearer <authToken>`. A non-2xx answer is a tool error that names only the status. Response bodies are capped at 16 MiB, and every occurrence of the token in a body is replaced with `[redacted]` before the model sees it. The token never appears in events, logs or errors.
+- Installation goes through the session's host-tool refresh, not the extension loader, so it is atomic and can be replaced at an idle boundary.
