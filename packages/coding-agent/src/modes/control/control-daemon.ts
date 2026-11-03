@@ -22,6 +22,7 @@ import {
 	type PromptSessionCommand,
 	promptSessionCommand,
 	interruptSessionCommand,
+	terminateSessionCommand,
 	queryCatalogCommand,
 	sessionCreatedFrame,
 } from "./wire/commands";
@@ -68,6 +69,26 @@ export class ControlDaemon {
 				}),
 			],
 			[
+				"terminate_session",
+				defineOperation({
+					schema: terminateSessionCommand,
+					requiresSubscription: true,
+					run: (connection, id, command) => {
+						const record = this.#registry.lookup(connection.principal, command.sessionId);
+						if (!record) {
+							connection.reject("unknown_session", "session is not retained", id);
+							return;
+						}
+						if (record.state === "terminated") {
+							connection.reject("unsupported_operation", "session has already been terminated", id);
+							return;
+						}
+						connection.reply(ackFrame(id));
+						void this.#turns.terminate(record);
+					},
+				}),
+			],
+			[
 				"interrupt_session",
 				defineOperation({
 					schema: interruptSessionCommand,
@@ -76,6 +97,10 @@ export class ControlDaemon {
 						const record = this.#registry.lookup(connection.principal, command.sessionId);
 						if (!record) {
 							connection.reject("unknown_session", "session is not retained", id);
+							return;
+						}
+						if (record.state === "terminated") {
+							connection.reject("unsupported_operation", "session has already been terminated", id);
 							return;
 						}
 						// Ack first: the interrupted outcome is published only after the run has unwound.
@@ -133,6 +158,10 @@ export class ControlDaemon {
 		const record = this.#registry.lookup(connection.principal, command.sessionId);
 		if (!record) {
 			connection.reject("unknown_session", "session is not retained", id);
+			return;
+		}
+		if (record.state === "terminated") {
+			connection.reject("unsupported_operation", "session has already been terminated", id);
 			return;
 		}
 		if (command.tools !== undefined && command.tools.length > 0) {

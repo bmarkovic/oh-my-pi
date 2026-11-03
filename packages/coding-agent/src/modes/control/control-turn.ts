@@ -100,6 +100,22 @@ export class ControlTurnController {
 		return true;
 	}
 
+	/**
+	 * Hard-stop the session. An active turn's only outcome becomes `session_terminated`,
+	 * published by its run once it has unwound. An idle session is torn down directly.
+	 * The session is disposed before that event, so termination is never announced early.
+	 */
+	terminate(record: ControlSessionRecord): Promise<void> {
+		const turn = record.turn;
+		if (!turn) return this.#retire(record, undefined);
+		// A hard stop overrides an interrupt or deadline already in progress; the run reports it.
+		turn.stop = "terminate";
+		record.session.abort({ reason: "control terminate" }).catch((error: unknown) => {
+			logger.warn("control terminate abort failed", { sessionId: record.sessionId, error: String(error) });
+		});
+		return Promise.resolve();
+	}
+
 	/** Queue a steering message into the active turn; no new start and no deadline change. */
 	async steer(record: ControlSessionRecord, prompt: string): Promise<void> {
 		await record.session.steer(prompt);
@@ -115,6 +131,10 @@ export class ControlTurnController {
 			runError = error;
 		}
 		if (turn.settled) return;
+		if (turn.stop === "terminate") {
+			await this.#retire(record, turn);
+			return;
+		}
 		if (turn.stop === "interrupt") {
 			this.#settleInterrupted(record, turn);
 			return;
@@ -191,6 +211,50 @@ export class ControlTurnController {
 				...(usage ? { usage } : {}),
 			};
 		});
+	}
+
+	/**
+	 * Dispose the session and retire its handle (a tombstone the daemon keeps, so later
+	 * commands answer `unsupported_operation`). `session_terminated` follows the teardown.
+	 * When teardown fails, nothing is confirmed: an active turn settles as `teardown_failed`
+	 * and the handle stays as it was, so a later terminate can retry.
+	 */
+	async #retire(record: ControlSessionRecord, turn: ControlTurn | undefined): Promise<void> {
+		const usage = turn ? turnUsage(record, turn) : undefined;
+		try {
+			await record.session.dispose();
+		} catch (error) {
+			const message = describeError(error);
+			logger.error("control session teardown failed", { sessionId: record.sessionId, error: message });
+			if (turn) {
+				this.#settle(record, turn, () => ({
+					version: 2,
+					type: "session_failed",
+					sessionId: record.sessionId,
+					at: Date.now(),
+					code: "teardown_failed",
+					error: message,
+				}));
+			}
+			return;
+		}
+		if (turn) {
+			this.#settle(record, turn, () => ({
+				version: 2,
+				type: "session_terminated",
+				sessionId: record.sessionId,
+				at: Date.now(),
+				...(usage ? { usage } : {}),
+			}));
+		} else {
+			this.#publish(record.principal, {
+				version: 2,
+				type: "session_terminated",
+				sessionId: record.sessionId,
+				at: Date.now(),
+			});
+		}
+		record.state = "terminated";
 	}
 
 	/** Publish the turn's one outcome and return the session to idle. Later calls are ignored. */

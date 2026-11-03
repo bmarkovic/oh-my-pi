@@ -25,7 +25,7 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 
 ## Catalog and session creation
 
-Advertised features: `catalog`, `steering`, `usage`, `interrupt`.
+Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`.
 
 - `query_catalog` returns `models` (`{id: "provider/modelId", provider}`) from the process model registry, and `agents` (`{name, description, roles: [], defaultModel?}`) discovered from the daemon's working directory. Prompts and definition paths are never included. `defaultModel` is set only when the agent's first model pattern is exactly a catalog id; looser patterns are omitted rather than guessed. `roles` is empty until agent roles exist.
 - `create_session` needs an accepted `subscribe_events`. `workspacePath` must be an absolute, existing, readable directory (`invalid_workspace` otherwise). `agent` and `model` are exact catalog names and ids (`unknown_agent`, `unknown_model`); an explicit model disables model fallback. Every selection is resolved before anything is created, so a rejected request creates no session.
@@ -49,3 +49,9 @@ Advertised features: `catalog`, `steering`, `usage`, `interrupt`.
 - A stop that arrives first decides the turn: an interrupt after the deadline fired, or a deadline after an interrupt, does not change the outcome that is already in progress.
 - `interrupt_session` on an idle session is an idempotent `ack` with no event.
 - An unknown handle answers `unknown_session`.
+
+## Terminate
+
+- `terminate_session` acknowledges, then disposes the session. On an idle session `session_terminated` follows the teardown and carries no usage. On an active session the turn's only outcome is `session_terminated{usage?}`: a hard stop overrides an interrupt or deadline already in progress, and no completed, failed or interrupted event is sent for that turn.
+- The event is published only after the session is disposed. If teardown fails, nothing is confirmed: an active turn settles as `session_failed{code: "teardown_failed"}` and the handle is left as it was, so a later `terminate_session` can retry.
+- A terminated handle is kept as a tombstone. `prompt_session`, `interrupt_session` and `terminate_session` on it return `unsupported_operation`. Tombstones are retained until the reconciliation feature forgets them.

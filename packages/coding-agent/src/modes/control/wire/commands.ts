@@ -24,6 +24,11 @@ export const interruptSessionCommand = type({
 	sessionId: "/\\S/",
 });
 
+export const terminateSessionCommand = type({
+	type: "'terminate_session'",
+	sessionId: "/\\S/",
+});
+
 export const promptSessionCommand = type({
 	type: "'prompt_session'",
 	sessionId: "/\\S/",
