@@ -21,7 +21,15 @@ import { CliUsageError } from "./usage-error";
 
 export { getExtraHelpText };
 
-export type Mode = "text" | "json" | "rpc" | "acp" | "rpc-ui";
+export type Mode = "text" | "json" | "rpc" | "acp" | "rpc-ui" | "control";
+
+/** Launch settings for `omp control serve`; set by the `control` subcommand, no CLI flag. */
+export interface ControlServeLaunch {
+	hostname: string;
+	port: number;
+	bearerToken?: string;
+	controlKey?: string;
+}
 
 export interface Args {
 	cwd?: string;
@@ -69,6 +77,8 @@ export interface Args {
 	help?: boolean;
 	version?: boolean;
 	mode?: Mode;
+	/** Control daemon settings (set by the `control` subcommand; no CLI flag). */
+	controlServe?: ControlServeLaunch;
 	noSession?: boolean;
 	sessionDir?: string;
 	providerSessionId?: string;
