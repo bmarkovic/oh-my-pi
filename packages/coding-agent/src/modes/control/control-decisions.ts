@@ -11,6 +11,8 @@ import type { DecisionOption } from "./wire/events";
 
 /** A question as the asking tool poses it. Options are labels; the store assigns their ids. */
 export interface DecisionRequest {
+	/** Set when the question comes from a child session: the handle of the session that spawned it. */
+	parentSessionId?: string;
 	question: string;
 	options: ReadonlyArray<{ label: string; description?: string }>;
 	allowFreeText: boolean;
@@ -44,6 +46,7 @@ interface DecisionEntry {
 	answeringUserId: string | undefined;
 	readonly resolve: (answer: DecisionAnswer | undefined) => void;
 	readonly question: string;
+	readonly parentSessionId: string | undefined;
 }
 
 /** Validate the answer's form against the question: exactly one of an option id or text. */
@@ -103,6 +106,7 @@ export class ControlDecisionStore {
 			answeringUserId: undefined,
 			resolve,
 			question: request.question,
+			parentSessionId: request.parentSessionId,
 		};
 		this.#entries.set(decisionId, entry);
 		this.#pendingBySession.set(sessionId, decisionId);
@@ -115,6 +119,7 @@ export class ControlDecisionStore {
 			question: request.question,
 			options,
 			allowFreeText: request.allowFreeText,
+			...(request.parentSessionId !== undefined ? { parentSessionId: request.parentSessionId } : {}),
 		});
 		const signal = request.signal;
 		if (signal?.aborted) this.#invalidate(entry);
@@ -150,6 +155,7 @@ export class ControlDecisionStore {
 			version: 2,
 			type: "decision_answered",
 			sessionId: entry.sessionId,
+			...(entry.parentSessionId !== undefined ? { parentSessionId: entry.parentSessionId } : {}),
 			at: Date.now(),
 			decisionId,
 			...("optionId" in answer ? { optionId: answer.optionId } : { text: answer.text }),

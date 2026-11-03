@@ -12,6 +12,8 @@ export interface ControlUIScope {
 	sessionId: string;
 	principal: ControlPrincipal;
 	decisions: ControlDecisionStore;
+	/** The spawning session's handle, when the scoped session is a child. */
+	parentSessionId?: string;
 }
 
 /** Labels and descriptions of select items, in the order the tool presented them. */
@@ -30,7 +32,14 @@ export function createControlExtensionUI(scope: ControlUIScope): ExtensionUICont
 		options: Array<{ label: string; description?: string }>,
 		allowFreeText: boolean,
 		signal?: AbortSignal,
-	) => scope.decisions.request(scope.sessionId, scope.principal, { question, options, allowFreeText, signal });
+	) =>
+		scope.decisions.request(scope.sessionId, scope.principal, {
+			question,
+			options,
+			allowFreeText,
+			signal,
+			parentSessionId: scope.parentSessionId,
+		});
 
 	return {
 		...noOpUIContext,

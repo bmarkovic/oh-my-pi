@@ -7,6 +7,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../../session/agent-session";
 import type { ControlPrincipal } from "./control-auth";
+import type { ControlChildLedger } from "./control-children";
 import type { ControlDecisionStore } from "./control-decisions";
 import type { ControlSessionRecord, ControlTurn, ControlUsageBaseline } from "./control-session-registry";
 import type { ControlEvent, ControlUsage } from "./wire/events";
@@ -33,7 +34,7 @@ function usageBaseline(source: UsageSource): ControlUsageBaseline {
  * The counters this turn consumed. Omitted entirely when the provider reported
  * no tokens for the turn, so a missing measurement is never shown as zero.
  */
-function turnUsage(record: ControlSessionRecord, turn: ControlTurn): ControlUsage | undefined {
+export function turnUsage(record: ControlSessionRecord, turn: ControlTurn): ControlUsage | undefined {
 	const current = usageBaseline(record.session.sessionManager);
 	const previous = turn.usageBaseline;
 	const totalTokens = Math.max(0, current.totalTokens - previous.totalTokens);
@@ -45,7 +46,7 @@ function turnUsage(record: ControlSessionRecord, turn: ControlTurn): ControlUsag
 	};
 }
 
-function assistantText(message: AssistantMessage): string {
+export function assistantText(message: AssistantMessage): string {
 	return message.content
 		.filter(block => block.type === "text")
 		.map(block => block.text)
@@ -55,10 +56,12 @@ function assistantText(message: AssistantMessage): string {
 export class ControlTurnController {
 	readonly #publish: ControlPublisher;
 	readonly #decisions: ControlDecisionStore;
+	readonly #children: ControlChildLedger;
 
-	constructor(publish: ControlPublisher, decisions: ControlDecisionStore) {
+	constructor(publish: ControlPublisher, decisions: ControlDecisionStore, children: ControlChildLedger) {
 		this.#publish = publish;
 		this.#decisions = decisions;
+		this.#children = children;
 	}
 
 	/**
@@ -98,6 +101,7 @@ export class ControlTurnController {
 		if (turn.stop !== undefined) return true;
 		turn.stop = "interrupt";
 		// Cancel the work before releasing the human's question, so no next step starts meanwhile.
+		this.#children.interruptChildren(record);
 		record.session.abort({ reason: "control interrupt" }).catch((error: unknown) => {
 			logger.warn("control interrupt abort failed", { sessionId: record.sessionId, error: String(error) });
 		});
@@ -227,6 +231,8 @@ export class ControlTurnController {
 	 * and the handle stays as it was, so a later terminate can retry.
 	 */
 	async #retire(record: ControlSessionRecord, turn: ControlTurn | undefined): Promise<void> {
+		// Children settle first: their terminal events precede this session's.
+		await this.#children.terminateChildren(record);
 		const usage = turn ? turnUsage(record, turn) : undefined;
 		try {
 			await record.session.dispose();
@@ -280,7 +286,7 @@ export class ControlTurnController {
 }
 
 /** Wait until the session is neither streaming nor holding queued messages. */
-async function waitUntilQuiet(session: AgentSession): Promise<void> {
+export async function waitUntilQuiet(session: AgentSession): Promise<void> {
 	do {
 		await session.waitForIdle();
 	} while (session.isStreaming || session.agent.hasQueuedMessages());

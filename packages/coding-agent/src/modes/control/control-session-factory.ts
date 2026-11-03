@@ -8,13 +8,15 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { ExtensionUIContext } from "../../extensibility/extensions/types";
 import type { CreateAgentSessionOptions } from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
-import type { AgentDefinition } from "../../task/types";
+import type { AgentDefinition, SubagentUiRouter } from "../../task/types";
 
 /** What a control `create_session` asks for after catalog resolution. */
 export interface ControlSessionRequest {
 	cwd: string;
 	agent?: AgentDefinition;
 	model?: Model;
+	/** Gives subagents this session spawns their own UI and tools. */
+	subagentUi?: SubagentUiRouter;
 }
 
 export interface ControlSessionHandle {
@@ -52,6 +54,7 @@ export function createControlSessionFactory(open: HeadlessSessionOpener): Contro
 		const sessionOptions: Partial<CreateAgentSessionOptions> = request.agent
 			? sessionOptionsForAgent(request.agent)
 			: {};
+		if (request.subagentUi !== undefined) sessionOptions.subagentUi = request.subagentUi;
 		if (request.model !== undefined) {
 			sessionOptions.model = request.model;
 			sessionOptions.disableModelFallback = true;

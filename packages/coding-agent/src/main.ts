@@ -161,7 +161,7 @@ import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
-import { cfgAsyncPrintWake, cfgToolsApprovalMode } from "./tools/settings";
+import { cfgAsyncEnabled, cfgAsyncPrintWake, cfgToolsApprovalMode } from "./tools/settings";
 import {
 	cfgAutocompleteMaxVisible,
 	cfgAutoResume,
@@ -2466,6 +2466,8 @@ export async function runRootCommand(
 			// launch session. The per-session factory is the headless one with agent id prefix `control`.
 			const serveLaunch = parsedArgs.controlServe;
 			if (!serveLaunch) throw new Error("omp control serve launched without serve options");
+			// Subagents of a control session run synchronously: an owned child must settle before its parent turn does.
+			cfgAsyncEnabled.override(settingsInstance, false);
 			const createHeadlessControlSession = createHeadlessSessionFactory({
 				baseOptions: sessionOptions,
 				settings: settingsInstance,

@@ -251,7 +251,7 @@ import {
 	projectSystemPromptToolMetadata,
 	withoutAgentsMd,
 } from "./system-prompt";
-import type { AgentDefinition } from "./task/types";
+import type { AgentDefinition, SubagentUiRouter } from "./task/types";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
@@ -712,6 +712,11 @@ export interface CreateAgentSessionOptions {
 
 	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
 	customTools?: (CustomTool | ToolDefinition)[];
+	/**
+	 * Gives each subagent this session spawns its own UI and host tools. Only
+	 * interactive hosts set it; the child is then built with prompts enabled.
+	 */
+	subagentUi?: SubagentUiRouter;
 	/** Inline extensions (merged with discovery). */
 	extensions?: ExtensionFactory[];
 	/** Additional extension paths to load (merged with discovery). */
@@ -2724,6 +2729,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			},
 			getArtifactManager: () => sessionManager.getArtifactManager(),
+			getSubagentUi: () => options.subagentUi,
 			settings,
 			authStorage,
 			modelRegistry,

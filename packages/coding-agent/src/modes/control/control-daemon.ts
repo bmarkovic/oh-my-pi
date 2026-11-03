@@ -12,6 +12,8 @@ import type { ControlConnection, ControlOperationHandler } from "./control-conne
 import { CONTROL_OPERATIONS, defineOperation } from "./control-operations";
 import { type ControlToolBinding, createEndpointTool, parseToolBindings } from "./control-endpoint-tool";
 import type { ControlSessionFactory, ControlSessionHandle } from "./control-session-factory";
+import type { SubagentUiAssignment, SubagentUiChild, SubagentUiRouter } from "../../task/types";
+import { ControlChildLedger } from "./control-children";
 import { ControlDecisionStore } from "./control-decisions";
 import { createControlExtensionUI } from "./control-ui-context";
 import { ControlSessionRegistry } from "./control-session-registry";
@@ -19,6 +21,8 @@ import { ControlTurnController } from "./control-turn";
 import {
 	type CreateSessionCommand,
 	catalogFrame,
+	childSessionsFrame,
+	enumerateChildSessionsCommand,
 	createSessionCommand,
 	answerDecisionCommand,
 	interruptSessionCommand,
@@ -48,6 +52,7 @@ export class ControlDaemon {
 	readonly #registry = new ControlSessionRegistry();
 	readonly #turns: ControlTurnController;
 	readonly #decisions: ControlDecisionStore;
+	readonly #children: ControlChildLedger;
 	/** Connections that subscribed; pruned lazily once closed. */
 	readonly #subscribers = new Set<ControlConnection>();
 
@@ -55,8 +60,10 @@ export class ControlDaemon {
 		this.#catalog = options.catalog;
 		this.#createSession = options.createSession;
 		this.#daemonCwd = options.daemonCwd;
-		this.#decisions = new ControlDecisionStore((principal, frame) => this.#publish(principal, frame));
-		this.#turns = new ControlTurnController((principal, frame) => this.#publish(principal, frame), this.#decisions);
+		const publish = (principal: ControlPrincipal, frame: ControlEvent) => this.#publish(principal, frame);
+		this.#decisions = new ControlDecisionStore(publish);
+		this.#children = new ControlChildLedger({ publish, decisions: this.#decisions, registry: this.#registry });
+		this.#turns = new ControlTurnController(publish, this.#decisions, this.#children);
 	}
 
 	/** The command table for this daemon: the base operations plus the session operations. */
@@ -118,6 +125,20 @@ export class ControlDaemon {
 				}),
 			],
 			[
+				"enumerate_child_sessions",
+				defineOperation({
+					schema: enumerateChildSessionsCommand,
+					run: (connection, id, command) => {
+						const parent = this.#registry.lookup(connection.principal, command.parentSessionId);
+						if (!parent) {
+							connection.reject("unknown_session", "session is not retained", id);
+							return;
+						}
+						connection.reply(childSessionsFrame(id, parent.sessionId, [...parent.children]));
+					},
+				}),
+			],
+			[
 				"interrupt_session",
 				defineOperation({
 					schema: interruptSessionCommand,
@@ -126,6 +147,14 @@ export class ControlDaemon {
 						const record = this.#registry.lookup(connection.principal, command.sessionId);
 						if (!record) {
 							connection.reject("unknown_session", "session is not retained", id);
+							return;
+						}
+						if (record.parentSessionId !== undefined) {
+							connection.reject(
+								"unsupported_operation",
+								"child sessions are controlled through their parent",
+								id,
+							);
 							return;
 						}
 						if (record.state === "terminated") {
@@ -149,6 +178,14 @@ export class ControlDaemon {
 							connection.reject("unknown_session", "session is not retained", id);
 							return;
 						}
+						if (record.parentSessionId !== undefined) {
+							connection.reject(
+								"unsupported_operation",
+								"child sessions are controlled through their parent",
+								id,
+							);
+							return;
+						}
 						if (record.state === "terminated") {
 							connection.reject("unsupported_operation", "session has already been terminated", id);
 							return;
@@ -159,6 +196,26 @@ export class ControlDaemon {
 				}),
 			],
 		]);
+	}
+
+	/**
+	 * Give a subagent its parent's control scope: its questions become decisions carrying the
+	 * parent's handle, and it receives the parent's tool bindings. Undefined once the parent is gone.
+	 */
+	#routeSubagent(parentId: string, child: SubagentUiChild): SubagentUiAssignment | undefined {
+		const parent = this.#registry.find(parentId);
+		if (!parent || parent.state === "terminated") return undefined;
+		const childId = crypto.randomUUID();
+		this.#children.adopt(parent, child.session, childId);
+		return {
+			uiContext: createControlExtensionUI({
+				sessionId: childId,
+				principal: parent.principal,
+				decisions: this.#decisions,
+				parentSessionId: parent.sessionId,
+			}),
+			tools: parent.tools.map(createEndpointTool),
+		};
 	}
 
 	/** Dispose every retained session. Called once at shutdown. */
@@ -188,6 +245,10 @@ export class ControlDaemon {
 		const record = this.#registry.lookup(connection.principal, command.sessionId);
 		if (!record) {
 			connection.reject("unknown_session", "session is not retained", id);
+			return;
+		}
+		if (record.parentSessionId !== undefined) {
+			connection.reject("unsupported_operation", "child sessions are controlled through their parent", id);
 			return;
 		}
 		if (record.state === "terminated") {
@@ -277,7 +338,12 @@ export class ControlDaemon {
 		const sessionId = crypto.randomUUID();
 		let handle: ControlSessionHandle;
 		try {
-			handle = await this.#createSession({ cwd: command.workspacePath, agent, model });
+			handle = await this.#createSession({
+				cwd: command.workspacePath,
+				agent,
+				model,
+				subagentUi: child => this.#routeSubagent(sessionId, child),
+			});
 		} catch (error) {
 			logger.warn("control session creation failed", { error: String(error) });
 			connection.reject("invalid_message", "session could not be created", id);
@@ -311,6 +377,7 @@ export class ControlDaemon {
 			session: handle.session,
 			tools: bindings,
 			lane: Promise.resolve(),
+			children: [],
 		});
 		connection.reply(sessionCreatedFrame(id, sessionId));
 	}

@@ -10,4 +10,5 @@ export const CONTROL_FEATURES: readonly string[] = [
 	"terminate",
 	"tool_bindings",
 	"decisions",
+	"child_lineage",
 ];

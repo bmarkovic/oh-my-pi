@@ -8,7 +8,10 @@ export type {
 	SubagentLifecyclePayload,
 } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { type BaseType, type FluentType, type } from "@oh-my-pi/omptype";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
+import type { ExtensionUIContext } from "../extensibility/extensions/types";
+import type { AgentSession } from "../session/agent-session";
 
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -334,3 +337,24 @@ export interface AgentDefinition {
 	source: AgentSource;
 	filePath?: string;
 }
+
+/** A subagent that a session just spawned, as seen by its parent's {@link SubagentUiRouter}. */
+export interface SubagentUiChild {
+	/** The child's live session, built and registered; no turn has started yet. */
+	session: AgentSession;
+	/** The agent id of the session that spawned the child. */
+	parentAgentId: string | undefined;
+}
+
+/** How a child gets its own UI (for its `ask` decisions) and its parent's host tools. */
+export interface SubagentUiAssignment {
+	uiContext: ExtensionUIContext;
+	tools: AgentTool[];
+}
+
+/**
+ * Routes each subagent a session spawns to a UI and tool set of its own. A host
+ * that supplies one (the control daemon) gets interactive children; `undefined`
+ * keeps the child headless as before.
+ */
+export type SubagentUiRouter = (child: SubagentUiChild) => SubagentUiAssignment | undefined;

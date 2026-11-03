@@ -46,6 +46,10 @@ export interface ControlSessionRecord {
 	tools: ControlToolBinding[];
 	/** Serializes prompt commands on this session, so a tool replacement never races a turn start. */
 	lane: Promise<void>;
+	/** The session that spawned this one; `undefined` for a root session. */
+	readonly parentSessionId?: string;
+	/** Direct children, in creation order, including settled ones. */
+	readonly children: string[];
 }
 
 export class ControlSessionRegistry {
@@ -53,6 +57,11 @@ export class ControlSessionRegistry {
 
 	register(record: ControlSessionRecord): void {
 		this.#records.set(record.sessionId, record);
+	}
+
+	/** The record for `sessionId` regardless of owner. For daemon-internal use only, never for a reply. */
+	find(sessionId: string): ControlSessionRecord | undefined {
+		return this.#records.get(sessionId);
 	}
 
 	/** The record when `principal` owns `sessionId`; otherwise `undefined`. */

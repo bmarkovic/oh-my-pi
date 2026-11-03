@@ -25,7 +25,7 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 
 ## Catalog and session creation
 
-Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `tool_bindings`, `decisions`.
+Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `tool_bindings`, `decisions`, `child_lineage`.
 
 - `query_catalog` returns `models` (`{id: "provider/modelId", provider}`) from the process model registry, and `agents` (`{name, description, roles: [], defaultModel?}`) discovered from the daemon's working directory. Prompts and definition paths are never included. `defaultModel` is set only when the agent's first model pattern is exactly a catalog id; looser patterns are omitted rather than guessed. `roles` is empty until agent roles exist.
 - `create_session` needs an accepted `subscribe_events`. `workspacePath` must be an absolute, existing, readable directory (`invalid_workspace` otherwise). `agent` and `model` are exact catalog names and ids (`unknown_agent`, `unknown_model`); an explicit model disables model fallback. Every selection is resolved before anything is created, so a rejected request creates no session.
@@ -72,3 +72,14 @@ Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `
 - Interrupt, terminate and the deadline invalidate a pending question before the session settles. A deadline while waiting settles the turn as `session_failed{code: "timeout"}`.
 - A multi-select question is refused to the tool, which gets an error instead of a question. Confirmations are denied.
 - Settled decisions are kept for the life of the daemon in this build; the reconciliation feature bounds that record window.
+
+## Child lineage
+
+- A subagent that a root control session spawns becomes a child handle when its session is built, before any of its activity. Its `session_started` carries `parentSessionId` set to the root's handle, and every later child event carries the same field.
+- Each child run settles once: `session_completed{output}` with the child's final text, `session_failed` on a model error, `session_interrupted` when the parent was interrupted, or `session_terminated` when the parent was terminated. The child's `usage` counts only its own run.
+- A child's `ask` questions are decisions whose events carry the child's handle and `parentSessionId`. Its tools use the parent's tool bindings, so a bound endpoint receives the parent's token.
+- `enumerate_child_sessions` lists the direct children of a handle in creation order, including settled ones. An unknown handle is `unknown_session`.
+- `prompt_session`, `interrupt_session` and `terminate_session` on a child return `unsupported_operation`; the child keeps running and changes nothing.
+- `interrupt_session` on the root interrupts its running children, and `terminate_session` on the root disposes them. Each child's terminal event precedes the root's.
+- Control sessions run their subagents synchronously (`async.enabled` is off for the control host), so a root turn does not complete while an owned child is still running.
+- Limits in this build: only direct children are tracked; a grandchild is disposed with its child but has no handle of its own. Child lifecycle is derived from the child's runs, so a child whose run ends without an observable outcome settles on the next quiet check.

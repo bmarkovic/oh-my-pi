@@ -27,6 +27,11 @@ export const answerDecisionCommand = type({
 	"answeringUserId?": "/\\S/",
 });
 
+export const enumerateChildSessionsCommand = type({
+	type: "'enumerate_child_sessions'",
+	parentSessionId: "/\\S/",
+});
+
 export const interruptSessionCommand = type({
 	type: "'interrupt_session'",
 	sessionId: "/\\S/",
@@ -96,6 +101,22 @@ export function catalogFrame(
 		agents: catalog.agents,
 		models: catalog.models,
 	};
+}
+
+export interface ChildSessionsFrame {
+	version: typeof CONTROL_PROTOCOL_VERSION;
+	inReplyTo: string;
+	type: "child_sessions";
+	parentSessionId: string;
+	childSessionIds: string[];
+}
+
+export function childSessionsFrame(
+	inReplyTo: string,
+	parentSessionId: string,
+	childSessionIds: string[],
+): ChildSessionsFrame {
+	return { version: CONTROL_PROTOCOL_VERSION, inReplyTo, type: "child_sessions", parentSessionId, childSessionIds };
 }
 
 export interface SessionCreatedFrame {

@@ -118,6 +118,7 @@ import {
 	type AgentDefinition,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
+	type SubagentUiRouter,
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
@@ -572,6 +573,8 @@ export interface ExecutorOptions {
 	 * artifacts directory (no per-subagent subdir).
 	 */
 	parentArtifactManager?: ArtifactManager;
+	/** Parent's router for giving this subagent its own UI and host tools (interactive hosts only). */
+	subagentUi?: SubagentUiRouter;
 	parentHindsightSessionState?: HindsightSessionState;
 	parentMnemopiSessionState?: MnemopiSessionState;
 	/**
@@ -4805,6 +4808,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
 					preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 					hasUI: false,
+					// A child of an interactive host may ask questions through its own UI (see `subagentUi`).
+					interactivePrompts: options.subagentUi !== undefined,
 					prewalk,
 					spawns: spawnsEnv,
 					taskDepth: childDepth,
@@ -4882,7 +4887,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						},
 					}),
 				);
-				({ session } = await awaitAbortable(sessionPromise));
+				const created = await awaitAbortable(sessionPromise);
+				session = created.session;
+				if (options.subagentUi && !preparedSession) {
+					const assignment = options.subagentUi({ session, parentAgentId: options.parentAgentId });
+					if (assignment) {
+						created.setToolUIContext(assignment.uiContext, true);
+						await awaitAbortable(session.refreshRpcHostTools(assignment.tools));
+					}
+				}
 				if (preparedSession) untrackedSession = session;
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
