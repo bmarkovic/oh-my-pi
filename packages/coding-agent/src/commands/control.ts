@@ -9,6 +9,7 @@ import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli"
 import { type Args as ParsedArgs, parseArgs, reportCliUsageError } from "../cli/args";
 import { controlHelp as commandHelp } from "../cli/command-help";
 import { runRootCommand } from "../main";
+import { readCredentialFile } from "../modes/control/control-credential-file";
 import { isLoopbackHost } from "../modes/control/control-server";
 
 const DEFAULT_BIND = "127.0.0.1:0";
@@ -31,8 +32,13 @@ export default class Control extends Command {
 			description: "Loopback listen address as host:port (port 0 picks a free port)",
 			default: DEFAULT_BIND,
 		}),
-		"token-file": Flags.string({ description: "File holding the bearer token (or set OMP_CONTROL_TOKEN)" }),
-		"key-file": Flags.string({ description: "File holding the X-Omp-Control-Key value (or set OMP_CONTROL_KEY)" }),
+		"token-file": Flags.string({
+			description: "File holding the bearer token, readable only by you (mode 0600; or set OMP_CONTROL_TOKEN)",
+		}),
+		"key-file": Flags.string({
+			description:
+				"File holding the X-Omp-Control-Key value, readable only by you (mode 0600; or set OMP_CONTROL_KEY)",
+		}),
 	};
 
 	static examples = [
@@ -115,15 +121,7 @@ export async function readCredential(file: string | undefined, envName: string):
 	// which inherit this process's environment: contract section 6 keeps control secrets from agents.
 	delete Bun.env[envName];
 	if (file === undefined) return fromEnv ? fromEnv : undefined;
-	let text: string;
-	try {
-		text = await Bun.file(file).text();
-	} catch {
-		throw new Error(`cannot read credential file: ${file}`);
-	}
-	const value = text.trim();
-	if (value.length === 0) throw new Error(`credential file is empty: ${file}`);
-	return value;
+	return readCredentialFile(file);
 }
 
 /** Remove the subcommand action and this subcommand's flags from argv, keeping everything else. */

@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- `omp control serve` refuses a `--token-file` or `--key-file` that other accounts can read (any group or other permission bit, or another owner) and exits 1 naming the file and its mode; the credential is never printed
 - Steering a control session while it waits on a question no longer closes the question: the decision stays pending until it is answered, interrupted, terminated or past its deadline, and the steering reaches the model after the answer
 - Hard-terminating a control session whose subagent is running now reports that child as `session_terminated` only; it no longer sends a `session_failed` for the abort the stop caused just before
 - Control tool bindings with dotted names such as `git.status` now reach the model under a provider-safe name (`git_status`); before, providers that accept only `[a-zA-Z0-9_-]` dropped the call and its result from the history, so the model never saw the tool answer and repeated the call

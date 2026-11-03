@@ -18,10 +18,17 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 ```
 
 - `--bind` defaults to `127.0.0.1:0` (a free loopback port). Other hosts are refused.
-- Credentials come from `--token-file` or `OMP_CONTROL_TOKEN` (bearer) and `--key-file` or `OMP_CONTROL_KEY` (control key). At least one is required; otherwise the command prints a message on stderr and exits 1.
+- Credentials come from `--token-file` or `OMP_CONTROL_TOKEN` (bearer) and `--key-file` or `OMP_CONTROL_KEY` (control key). At least one is required; otherwise the command prints a message on stderr and exits 1. Credential files must be owner-only (see Credential files).
 - On start, stdout carries exactly one line: the `ws://` URL including `/control`.
 - SIGINT and SIGTERM close the listener and dispose every session before the process exits with the signal's status.
 - The launch's other flags (for example `--approval-mode`) apply to the sessions the daemon creates.
+
+## Credential files
+
+- `--token-file` and `--key-file` must be regular files owned by the daemon's user with no group or other permission bits (`chmod 600`). Otherwise the daemon refuses to start: it exits 1 before printing the URL, names the file and its mode on stderr, and never prints the file's bytes. There is no override.
+- Windows does not check file permissions (POSIX mode bits do not describe NTFS ACLs). Keep the file in a directory only you can read.
+- Mode bits do not stop processes running as the same user, including the agent's own shell. Until the agent runs under a separate account or sandbox, a same-user agent can read the file.
+- Credentials from `OMP_CONTROL_TOKEN` and `OMP_CONTROL_KEY` are unset from the environment once read, so agent-spawned processes do not inherit them.
 
 ## Catalog and session creation
 
