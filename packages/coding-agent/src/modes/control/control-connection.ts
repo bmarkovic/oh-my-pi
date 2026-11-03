@@ -98,6 +98,11 @@ export class ControlConnection {
 		this.#outboundLimits = { ...DEFAULT_OUTBOUND_LIMITS, ...options.outbound };
 	}
 
+	/** True once every queued frame has been written to the transport. */
+	get drained(): boolean {
+		return this.#outbound.length === 0 && this.#socket.bufferedAmount() === 0;
+	}
+
 	/** True while frames wait for the transport. Pings are not queued, so the heartbeat skips them meanwhile. */
 	get congested(): boolean {
 		return this.#outbound.length > 0 || this.#socket.bufferedAmount() > this.#outboundLimits.highWaterBytes;

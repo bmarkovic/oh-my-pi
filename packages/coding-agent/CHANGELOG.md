@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Stopping `omp control serve` settles each active control turn as `session_failed` with code `daemon_shutdown`, terminates its sessions children first, then closes clients with 1001 instead of dropping them; a client no longer has to wait out its recovery window to learn the outcome
 - A control event whose text exceeds the 16 MiB message limit, such as a long final answer or a long question, is cut to fit and marked with an `elided` list, instead of killing the connection; the cut event is what `inspect_session` and `reconnect` report
 - A slow control client no longer loses acknowledgements or final outcomes silently: frames queue per connection in order and, past 64 MiB of backlog, the daemon closes the connection with 1013 so the client can reconnect and reconcile
 - `omp control serve` refuses a `--token-file` or `--key-file` that other accounts can read (any group or other permission bit, or another owner) and exits 1 naming the file and its mode; the credential is never printed

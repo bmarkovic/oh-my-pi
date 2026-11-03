@@ -42,6 +42,10 @@ export async function runControlServe(options: RunControlServeOptions): Promise<
 	const stopped = Promise.withResolvers<void>();
 	const unregister = postmortem.register("control-serve", async () => {
 		try {
+			// Stop taking new clients, stop the sessions (each settles or terminates before its connection closes),
+			// then flush and close the connections.
+			server.stopAccepting();
+			await daemon.shutdown();
 			await server.close();
 			await daemon.dispose();
 		} finally {

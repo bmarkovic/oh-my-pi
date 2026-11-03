@@ -10,7 +10,12 @@ import type { ControlPrincipal } from "./control-auth";
 import type { ControlChildLedger } from "./control-children";
 import type { ControlRetention } from "./control-retention";
 import type { ControlDecisionStore } from "./control-decisions";
-import type { ControlSessionRecord, ControlTurn, ControlUsageBaseline } from "./control-session-registry";
+import {
+	type ControlSessionRecord,
+	type ControlTurn,
+	type ControlUsageBaseline,
+	DAEMON_SHUTDOWN_MESSAGE,
+} from "./control-session-registry";
 import type { ControlEvent, ControlUsage } from "./wire/events";
 
 /**
@@ -176,6 +181,29 @@ export class ControlTurnController {
 		return Promise.resolve();
 	}
 
+	/**
+	 * Stop the session for daemon shutdown. An active turn settles as `session_failed{daemon_shutdown}`, with
+	 * its children settled and terminated first, and then the session is torn down and `session_terminated`
+	 * is published. An idle session is torn down directly. Resolves once the handle is retired.
+	 */
+	async shutdown(record: ControlSessionRecord): Promise<void> {
+		if (record.retirement !== undefined) return record.retirement;
+		const turn = record.turn;
+		if (turn) {
+			if (turn.stop === undefined) turn.stop = "shutdown";
+			this.#children.markForShutdown(record);
+			this.#decisions.invalidateSession(record.sessionId);
+			record.session.abort({ reason: "daemon shutdown" }).catch((error: unknown) => {
+				logger.warn("control shutdown abort failed", { sessionId: record.sessionId, error: describeError(error) });
+			});
+			// The run ends in one of three ways: a shutdown run retires the handle itself, an earlier stop settles the
+			// turn, or the handle is already retiring. Wait for the turn to leave the record.
+			while (record.turn === turn && record.retirement === undefined) await Bun.sleep(5);
+			if (record.retirement !== undefined) return record.retirement;
+		}
+		return this.#retire(record, undefined);
+	}
+
 	/** Queue a steering message into the active turn; no new start and no deadline change. */
 	async steer(record: ControlSessionRecord, prompt: string): Promise<void> {
 		await record.session.steer(prompt);
@@ -195,6 +223,13 @@ export class ControlTurnController {
 			// Owned child turns settle before the parent's outcome (contract section 5).
 			await this.#children.settleChildren(record);
 			if (turn.settled) return;
+		}
+		if (turn.stop === "shutdown") {
+			// Children have settled, and their terminal events are published before the root's own outcome.
+			await this.#children.terminateChildren(record);
+			this.#settleFailed(record, turn, "daemon_shutdown", DAEMON_SHUTDOWN_MESSAGE);
+			await this.#retire(record, undefined);
+			return;
 		}
 		if (turn.stop === "terminate") {
 			await this.#retire(record, turn);

@@ -61,11 +61,21 @@ export interface ControlServerOptions extends ControlCredentials {
 }
 
 export interface ControlServerHandle {
-	/** Full `ws://` URL including the `/control` path. */
+	/** Full `ws://` or `wss://` URL including the `/control` path. */
 	readonly url: string;
-	/** Stop listening and close every connection. */
+	/** Stop accepting new connections. Open connections stay open, so the daemon can still answer them. */
+	stopAccepting(): void;
+	/**
+	 * Flush every connection's queued frames (bounded), close each with 1001, and stop the listener. Resolves
+	 * once the connections have closed, or after a short grace period.
+	 */
 	close(): Promise<void>;
 }
+
+/** How long `close` waits for queued frames to reach the transport. */
+const FLUSH_GRACE_MS = 500;
+/** How long `close` waits for connections to finish their close handshake. */
+const CLOSE_GRACE_MS = 1_000;
 
 interface ControlSocketData {
 	principal: ControlPrincipal;
@@ -190,17 +200,35 @@ export async function startControlServer(options: ControlServerOptions): Promise
 	});
 
 	watch?.start();
+	/** Push queued frames toward the transport: a drain event may not come when a socket has already emptied. */
+	const flushAll = () => {
+		for (const connection of connections) connection.flush();
+	};
+
 	const host = hostname.includes(":") ? `[${hostname}]` : hostname;
 	const url = `${tls ? "wss" : "ws"}://${host}:${server.port}${CONTROL_PATH}`;
 	logger.debug("control listener started", { port: server.port, hostname, tls: tls !== undefined });
 
 	return {
 		url,
+		stopAccepting() {
+			server.stop(false);
+		},
 		async close() {
 			watch?.stop();
+			await waitFor(() => [...connections].every(connection => connection.drained), FLUSH_GRACE_MS, flushAll);
 			for (const connection of connections) connection.shutdown();
-			connections.clear();
+			await waitFor(() => connections.size === 0, CLOSE_GRACE_MS);
 			await server.stop(true);
 		},
 	};
+}
+
+/** Poll `done` until it holds or `timeoutMs` passes, calling `tick` between checks. Never throws. */
+async function waitFor(done: () => boolean, timeoutMs: number, tick?: () => void): Promise<void> {
+	const deadline = performance.now() + timeoutMs;
+	while (!done() && performance.now() < deadline) {
+		tick?.();
+		await Bun.sleep(5);
+	}
 }

@@ -10,11 +10,12 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { ControlPublisher } from "./control-turn";
 import { assistantText, turnUsage, waitUntilQuiet } from "./control-turn";
 import type { ControlDecisionStore } from "./control-decisions";
-import type {
-	ControlSessionRecord,
-	ControlSessionRegistry,
-	ControlTurn,
-	ControlUsageBaseline,
+import {
+	type ControlSessionRecord,
+	type ControlSessionRegistry,
+	type ControlTurn,
+	type ControlUsageBaseline,
+	DAEMON_SHUTDOWN_MESSAGE,
 } from "./control-session-registry";
 import type { ControlEvent, ControlUsage } from "./wire/events";
 
@@ -151,6 +152,26 @@ export class ControlChildLedger {
 		}
 	}
 
+	/**
+	 * Mark every active run in the subtree for daemon shutdown and abort it. Each settles as
+	 * `session_failed{code:"daemon_shutdown"}` once it has unwound (see {@link settleChildren}).
+	 */
+	markForShutdown(parent: ControlSessionRecord): void {
+		for (const childId of parent.children) {
+			const child = this.#registry.find(childId);
+			if (!child) continue;
+			const turn = child.turn;
+			if (turn && turn.stop === undefined) {
+				turn.stop = "shutdown";
+				this.#decisions.invalidateSession(child.sessionId);
+				child.session.abort({ reason: "daemon shutdown" }).catch((error: unknown) => {
+					logger.warn("control child shutdown abort failed", { sessionId: child.sessionId, error: String(error) });
+				});
+			}
+			this.markForShutdown(child);
+		}
+	}
+
 	/** Publish a settled outcome and keep it as the child's last outcome. */
 	#outcome(child: ControlSessionRecord, event: ControlEvent): void {
 		child.lastOutcome = this.#publish(child.principal, event);
@@ -242,6 +263,16 @@ export class ControlChildLedger {
 		};
 		if (turn.stop === "interrupt") {
 			this.#outcome(child, { ...base, type: "session_interrupted", ...(usage ? { usage } : {}) });
+			return;
+		}
+		if (turn.stop === "shutdown") {
+			this.#outcome(child, {
+				...base,
+				type: "session_failed",
+				code: "daemon_shutdown",
+				error: DAEMON_SHUTDOWN_MESSAGE,
+				...(usage ? { usage } : {}),
+			});
 			return;
 		}
 		const last = child.session.getLastAssistantMessage();

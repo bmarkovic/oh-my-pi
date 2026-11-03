@@ -21,8 +21,15 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 - `--bind` defaults to `127.0.0.1:0` (a free loopback port). Non-loopback hosts need `--tls-cert` and `--tls-key`; wildcard addresses (`0.0.0.0`, `::`) are refused even with TLS.
 - Credentials come from `--token-file` or `OMP_CONTROL_TOKEN` (bearer) and `--key-file` or `OMP_CONTROL_KEY` (control key). At least one is required; otherwise the command prints a message on stderr and exits 1. Credential files must be owner-only (see Credential files).
 - On start, stdout carries exactly one line: the `ws://` URL including `/control`.
-- SIGINT and SIGTERM close the listener and dispose every session before the process exits with the signal's status.
+- SIGINT and SIGTERM run the shutdown described in Shutdown, then the process exits with the signal's status (130 for SIGINT, 143 for SIGTERM). SIGHUP also shuts down, exiting 129, so run the daemon under a supervisor or `nohup` if the terminal may hang up.
 - The launch's other flags (for example `--approval-mode`) apply to the sessions the daemon creates.
+
+## Shutdown
+
+- Shutdown stops accepting connections at once. Over open connections, `create_session` and `prompt_session` (including steering) answer `unsupported_operation` with `daemon is shutting down`, with no side effect. `inspect_session`, `enumerate_child_sessions`, `interrupt_session`, `terminate_session`, `answer_decision` and `reconnect` keep working.
+- Every root session of every principal is stopped, including orphans whose connection already closed. For each active turn, deepest handle first, the outcome is `session_failed` with `code: "daemon_shutdown"` and the message `daemon is shutting down`, and it is the turn's one outcome. Then each handle is disposed deepest first and `session_terminated` follows, with no `usage`. An idle session gets only `session_terminated`. A child's events precede its parent's.
+- The failed outcome projects as a failure, not a cancellation: the daemon stopped the work, nobody asked to cancel it. `session_failed.code` is an open string; `daemon_shutdown` is the value for this case.
+- Stopping has an 8-second budget. If sessions are still settling when it runs out, the daemon logs a warning and disposes the rest without waiting for them. Then it flushes each connection's queued frames (up to 500 ms), closes every connection with 1001 `server shutting down`, and waits up to one second for the close handshakes before the listener stops.
 
 ## Oversize events
 

@@ -49,6 +49,12 @@ import type { ControlEvent } from "./wire/events";
 /** Turn budget when `create_session` omits `timeoutMs` (contract section 2.2). */
 export const DEFAULT_TURN_TIMEOUT_MS = 1_800_000;
 
+/**
+ * How long shutdown may take to settle and tear down the sessions. It sits inside the process postmortem's
+ * cleanup deadline, with room left for flushing the connections and closing them.
+ */
+export const DEFAULT_SHUTDOWN_DEADLINE_MS = 8_000;
+
 export interface ControlDaemonOptions {
 	catalog: ControlCatalogSource;
 	createSession: ControlSessionFactory;
@@ -74,6 +80,8 @@ export class ControlDaemon {
 	readonly #retention: ControlRetention;
 	/** Open authenticated connections per principal. */
 	readonly #connections = new Map<ControlPrincipal, number>();
+	/** Set once shutdown starts: new work is refused, and in-flight sessions are stopped. */
+	#draining = false;
 	/** Connections that subscribed; pruned lazily once closed. */
 	readonly #subscribers = new Set<ControlConnection>();
 
@@ -331,6 +339,32 @@ export class ControlDaemon {
 		};
 	}
 
+	/**
+	 * Stop the daemon's sessions. New `create_session` and `prompt_session` commands are refused from here on.
+	 * Each root session of every principal, attached or orphaned, is stopped in its own lane. An active turn
+	 * settles as `session_failed{daemon_shutdown}`, then its session is terminated, deepest first. If the
+	 * deadline passes first, every session still retained is disposed and the function returns.
+	 */
+	async shutdown(options: { deadlineMs?: number } = {}): Promise<void> {
+		this.#draining = true;
+		this.#retention.dispose();
+		const roots = this.#registry.all().filter(record => record.parentSessionId === undefined && !isRetired(record));
+		const stopping = Promise.allSettled(roots.map(root => this.#inLane(root, () => this.#turns.shutdown(root))));
+		let timer: Timer | undefined;
+		const deadline = new Promise<"deadline">(resolve => {
+			timer = setTimeout(() => resolve("deadline"), options.deadlineMs ?? DEFAULT_SHUTDOWN_DEADLINE_MS);
+		});
+		const outcome = await Promise.race([stopping.then(() => "stopped" as const), deadline]);
+		clearTimeout(timer);
+		if (outcome === "deadline") {
+			logger.warn("control daemon shutdown deadline reached; disposing remaining sessions", {
+				sessions: this.#registry.all().length,
+			});
+			// Not awaited: a session whose dispose never settles must not hold the shutdown past its deadline.
+			void this.#registry.disposeAll();
+		}
+	}
+
 	/** Dispose every retained session and clear the retention clocks. Called once at shutdown. */
 	async dispose(): Promise<void> {
 		this.#retention.dispose();
@@ -388,6 +422,10 @@ export class ControlDaemon {
 	}
 
 	async #promptSession(connection: ControlConnection, id: string, command: PromptSessionCommand): Promise<void> {
+		if (this.#draining) {
+			connection.reject("unsupported_operation", "daemon is shutting down", id);
+			return;
+		}
 		const record = this.#registry.lookup(connection.principal, command.sessionId);
 		if (!record) {
 			connection.reject("unknown_session", "session is not retained", id);
@@ -449,6 +487,10 @@ export class ControlDaemon {
 	}
 
 	async #createSessionFor(connection: ControlConnection, id: string, command: CreateSessionCommand): Promise<void> {
+		if (this.#draining) {
+			connection.reject("unsupported_operation", "daemon is shutting down", id);
+			return;
+		}
 		if (!path.isAbsolute(command.workspacePath) || !(await isReadableDirectory(command.workspacePath))) {
 			connection.reject("invalid_workspace", "workspacePath must be an existing, readable absolute directory", id);
 			return;

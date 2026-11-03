@@ -87,6 +87,23 @@ describe("omp control serve", () => {
 	}, 30_000);
 });
 
+describe("omp control serve shutdown", () => {
+	it("closes an open client with 1001 on SIGTERM, and exits with the SIGTERM status", async () => {
+		const home = TempDir.createSync("@control-cli-shutdown-");
+		const token = "cli-shutdown-token-for-tests";
+		const child = spawnControl(home.path(), { OMP_CONTROL_TOKEN: token });
+		try {
+			const client = await connectClient(await readFirstLine(child), { Authorization: `Bearer ${token}` });
+			expect(await handshake(client)).toMatchObject({ type: "welcome", selectedVersion: 2 });
+			child.kill("SIGTERM");
+			expect((await client.closedWithin(10_000)).code).toBe(1001);
+			expect(await child.exited).toBe(143);
+		} finally {
+			await home.remove();
+		}
+	}, 30_000);
+});
+
 describe("omp control serve credential files", () => {
 	const TOKEN = "file-token-for-cli-tests";
 
