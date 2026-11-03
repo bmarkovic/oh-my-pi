@@ -33,11 +33,12 @@ export default class Control extends Command {
 			default: DEFAULT_BIND,
 		}),
 		"token-file": Flags.string({
-			description: "File holding the bearer token, readable only by you (mode 0600; or set OMP_CONTROL_TOKEN)",
+			description:
+				"File holding the bearer token, readable only by you (mode 0600), re-read as it changes; or set OMP_CONTROL_TOKEN",
 		}),
 		"key-file": Flags.string({
 			description:
-				"File holding the X-Omp-Control-Key value, readable only by you (mode 0600; or set OMP_CONTROL_KEY)",
+				"File holding the X-Omp-Control-Key value, readable only by you (mode 0600), re-read as it changes; or set OMP_CONTROL_KEY",
 		}),
 	};
 
@@ -97,7 +98,17 @@ export default class Control extends Command {
 			throw error;
 		}
 		parsed.mode = "control";
-		parsed.controlServe = { hostname: bind.hostname, port: bind.port, bearerToken, controlKey };
+		// File credentials go to the daemon as paths, so rotation is picked up; environment ones are passed as values.
+		const bearerTokenFile = flags["token-file"];
+		const controlKeyFile = flags["key-file"];
+		parsed.controlServe = {
+			hostname: bind.hostname,
+			port: bind.port,
+			bearerTokenFile,
+			controlKeyFile,
+			bearerToken: bearerTokenFile === undefined ? bearerToken : undefined,
+			controlKey: controlKeyFile === undefined ? controlKey : undefined,
+		};
 		await runRootCommand(parsed, launchArgs);
 	}
 }

@@ -334,11 +334,14 @@ export async function startDaemonWith(options: {
 	createSession: ControlSessionFactory;
 	daemonCwd: string;
 	retention?: Partial<ControlRetentionTiming>;
+	/** Listener options, for example credential files instead of the fixed test credentials. */
+	server?: TestDaemonOptions;
 }): Promise<{ server: TestDaemon; control: ControlDaemon; dispose(): Promise<void> }> {
 	const control = new ControlDaemon(options);
 	const server = await startTestDaemon({
 		operations: control.operations(),
 		onConnection: (principal, opened) => control.connectionChanged(principal, opened),
+		...options.server,
 	});
 	return {
 		server,

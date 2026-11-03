@@ -30,12 +30,16 @@ export function validateControlCredentials(credentials: ControlCredentials): voi
 	}
 }
 
-/** Constant-time string equality; a length mismatch is rejected before the byte comparison. */
+/**
+ * Constant-time credential equality. Both sides are reduced to SHA-256 digests of equal length,
+ * so the comparison branches on neither the credential's bytes nor its length.
+ */
 function credentialMatches(presented: string, expected: string): boolean {
-	const left = new TextEncoder().encode(presented);
-	const right = new TextEncoder().encode(expected);
-	if (left.byteLength !== right.byteLength) return false;
-	return timingSafeEqual(left, right);
+	return timingSafeEqual(credentialDigest(presented), credentialDigest(expected));
+}
+
+function credentialDigest(value: string): Uint8Array {
+	return new Bun.CryptoHasher("sha256").update(value).digest();
 }
 
 /**

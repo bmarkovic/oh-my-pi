@@ -26,6 +26,7 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 ## Credential files
 
 - `--token-file` and `--key-file` must be regular files owned by the daemon's user with no group or other permission bits (`chmod 600`). Otherwise the daemon refuses to start: it exits 1 before printing the URL, names the file and its mode on stderr, and never prints the file's bytes. There is no override.
+- Rotation: the daemon stat-polls credential files every two seconds and re-reads a file that changed. Replace the file by writing a temporary file and renaming it over the original, so a half-written value is never read. Upgrades that present the old value get 401 after the next poll. Connections already open stay open. Deleting the file, or leaving it unusable (for example mode 0644), refuses that credential until a valid file reappears; the daemon logs the path and reason, never the value. Environment credentials (`OMP_CONTROL_TOKEN`, `OMP_CONTROL_KEY`) are fixed for the process lifetime; restart the daemon to change them.
 - Windows does not check file permissions (POSIX mode bits do not describe NTFS ACLs). Keep the file in a directory only you can read.
 - Mode bits do not stop processes running as the same user, including the agent's own shell. Until the agent runs under a separate account or sandbox, a same-user agent can read the file.
 - Credentials from `OMP_CONTROL_TOKEN` and `OMP_CONTROL_KEY` are unset from the environment once read, so agent-spawned processes do not inherit them.

@@ -11,11 +11,15 @@ import {
 	validateControlCredentials,
 } from "./control-auth";
 import { ControlConnection, type ControlOperationHandler, type ControlTiming } from "./control-connection";
+import { type ControlCredentialFiles, ControlCredentialWatch } from "./control-credential-file";
 import { CONTROL_OPERATIONS } from "./control-operations";
 import { CONTROL_MAX_MESSAGE_BYTES } from "./wire/envelope";
 
 /** The only path the control protocol is served on. */
 export const CONTROL_PATH = "/control";
+
+/** How often credential files are stat-polled for rotation. */
+export const DEFAULT_CREDENTIAL_POLL_MS = 2_000;
 
 const DEFAULT_TIMING: ControlTiming = {
 	helloTimeoutMs: 10_000,
@@ -24,6 +28,13 @@ const DEFAULT_TIMING: ControlTiming = {
 };
 
 export interface ControlServerOptions extends ControlCredentials {
+	/**
+	 * Credentials read from files and re-read as they change (see `ControlCredentialWatch`). When set, the
+	 * fixed `bearerToken` and `controlKey` above are ignored for the files' principals.
+	 */
+	credentialFiles?: ControlCredentialFiles;
+	/** Stat-poll interval for `credentialFiles`; defaults to `DEFAULT_CREDENTIAL_POLL_MS`. */
+	credentialPollMs?: number;
 	/** Loopback host to bind. Defaults to `127.0.0.1`; any other host is refused. */
 	hostname?: string;
 	/** Port to bind; `0` picks a free port. */
@@ -56,13 +67,28 @@ export function isLoopbackHost(host: string): boolean {
 }
 
 export async function startControlServer(options: ControlServerOptions): Promise<ControlServerHandle> {
-	validateControlCredentials(options);
 	const hostname = options.hostname ?? "127.0.0.1";
 	if (!isLoopbackHost(hostname)) {
 		throw new Error(
 			`control server refuses non-loopback bind ${hostname}: remote control requires TLS, which is not available yet`,
 		);
 	}
+	const files = options.credentialFiles;
+	const watch =
+		files !== undefined && (files.bearerTokenFile !== undefined || files.controlKeyFile !== undefined)
+			? new ControlCredentialWatch(files, options.credentialPollMs ?? DEFAULT_CREDENTIAL_POLL_MS)
+			: undefined;
+	// File credentials are read before anything is served: an unusable file fails startup, not one upgrade.
+	await watch?.load();
+	// A principal backed by a file follows the file (absent while it is refused); the others keep their fixed value.
+	const credentials = (): ControlCredentials => {
+		const live = watch?.current() ?? {};
+		return {
+			bearerToken: files?.bearerTokenFile !== undefined ? live.bearerToken : options.bearerToken,
+			controlKey: files?.controlKeyFile !== undefined ? live.controlKey : options.controlKey,
+		};
+	};
+	validateControlCredentials(credentials());
 	const timing: ControlTiming = { ...DEFAULT_TIMING, ...options.timing };
 	const operations = options.operations ?? CONTROL_OPERATIONS;
 	const onConnection = options.onConnection;
@@ -73,7 +99,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		port: options.port ?? 0,
 		fetch(request, bunServer) {
 			if (new URL(request.url).pathname !== CONTROL_PATH) return new Response("Not found", { status: 404 });
-			const principal = authenticateControlRequest(request, options);
+			const principal = authenticateControlRequest(request, credentials());
 			if (principal === undefined) return new Response("Unauthorized", { status: 401 });
 			if (bunServer.upgrade(request, { data: { principal } })) return undefined;
 			return new Response("Upgrade required", { status: 426 });
@@ -119,6 +145,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		},
 	});
 
+	watch?.start();
 	const host = hostname.includes(":") ? `[${hostname}]` : hostname;
 	const url = `ws://${host}:${server.port}${CONTROL_PATH}`;
 	logger.debug("control listener started", { port: server.port, hostname });
@@ -126,6 +153,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 	return {
 		url,
 		async close() {
+			watch?.stop();
 			for (const connection of connections) connection.shutdown();
 			connections.clear();
 			await server.stop(true);

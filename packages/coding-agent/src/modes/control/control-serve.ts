@@ -13,6 +13,8 @@ import { startControlServer } from "./control-server";
 export interface RunControlServeOptions {
 	hostname: string;
 	port: number;
+	bearerTokenFile?: string;
+	controlKeyFile?: string;
 	bearerToken?: string;
 	controlKey?: string;
 	catalog: ControlCatalogSource;
@@ -29,6 +31,7 @@ export async function runControlServe(options: RunControlServeOptions): Promise<
 	const server = await startControlServer({
 		hostname: options.hostname,
 		port: options.port,
+		credentialFiles: { bearerTokenFile: options.bearerTokenFile, controlKeyFile: options.controlKeyFile },
 		bearerToken: options.bearerToken,
 		controlKey: options.controlKey,
 		operations: daemon.operations(),

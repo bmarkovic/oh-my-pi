@@ -15,6 +15,10 @@
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 
+### Changed
+
+- `omp control serve` re-reads `--token-file` and `--key-file` every two seconds, so rotating a credential takes effect without a restart: the old value is refused once the file changes, and existing connections stay open. A deleted or unusable credential file refuses its upgrades until it is fixed
+
 ### Fixed
 
 - `omp control serve` refuses a `--token-file` or `--key-file` that other accounts can read (any group or other permission bit, or another owner) and exits 1 naming the file and its mode; the credential is never printed
