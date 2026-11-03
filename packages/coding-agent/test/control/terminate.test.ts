@@ -91,4 +91,29 @@ describe("control terminate", () => {
 		}
 		expect(mock.calls).toHaveLength(0);
 	});
+
+	it("announces one termination and starts no turn when terminate, terminate and prompt arrive back to back", async () => {
+		const mock = createMockModel({ provider: "mock", id: "model-a", responses: [{ content: ["never"] }] });
+		const { client, factory, workspace } = await setup(mock);
+		const sessionId = await createSessionFor(client, workspace);
+		const session = factory.sessions[0];
+		const realDispose = session.dispose.bind(session);
+		// A slow teardown keeps the handle retiring while the later commands arrive.
+		const disposeSpy = spyOn(session, "dispose").mockImplementation(async () => {
+			await Bun.sleep(100);
+			return realDispose();
+		});
+
+		client.send({ version: 2, id: "t1", type: "terminate_session", sessionId });
+		client.send({ version: 2, id: "t2", type: "terminate_session", sessionId });
+		client.send({ version: 2, id: "p1", type: "prompt_session", sessionId, prompt: "too late" });
+
+		const frames = [await client.next(), await client.next(), await client.next(), await client.next()];
+		expect(frames.filter(frame => frame.type === "session_terminated")).toHaveLength(1);
+		expect(frames.find(frame => frame.inReplyTo === "t2")).toMatchObject({ code: "unsupported_operation" });
+		expect(frames.find(frame => frame.inReplyTo === "p1")).toMatchObject({ code: "unsupported_operation" });
+		expect(frames.some(frame => frame.type === "session_started")).toBe(false);
+		expect(disposeSpy).toHaveBeenCalledTimes(1);
+		expect(mock.calls).toHaveLength(0);
+	});
 });

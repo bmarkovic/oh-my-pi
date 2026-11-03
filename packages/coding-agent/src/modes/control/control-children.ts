@@ -99,6 +99,17 @@ export class ControlChildLedger {
 		}
 	}
 
+	/** Wait for every child run still in progress to unwind, and publish each child's outcome. */
+	async settleChildren(parent: ControlSessionRecord): Promise<void> {
+		for (const childId of parent.children) {
+			const child = this.#registry.find(childId);
+			const turn = child?.turn;
+			if (!child || !turn) continue;
+			await waitUntilQuiet(child.session);
+			if (child.turn === turn && child.state !== "terminated") this.#settle(child, turn);
+		}
+	}
+
 	/**
 	 * Hard-stop every child, in creation order: abort active runs, dispose each session,
 	 * and publish `session_terminated` for it. Settles before the parent's own teardown.

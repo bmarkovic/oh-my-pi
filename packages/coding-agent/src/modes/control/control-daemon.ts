@@ -59,7 +59,7 @@ export interface ControlDaemonOptions {
 
 /** A retired handle answers only `unsupported_operation` until it is forgotten. */
 function isRetired(record: ControlSessionRecord): boolean {
-	return record.state === "terminated" || record.state === "expired";
+	return record.state === "terminated" || record.state === "expired" || record.retirement !== undefined;
 }
 
 export class ControlDaemon {
@@ -252,13 +252,16 @@ export class ControlDaemon {
 							);
 							return;
 						}
-						if (isRetired(record)) {
-							connection.reject("unsupported_operation", "session has already been terminated", id);
-							return;
-						}
-						// Ack first: the interrupted outcome is published only after the run has unwound.
-						connection.reply(ackFrame(id));
-						this.#turns.interrupt(record);
+						// Queued behind earlier prompts on this session, so a stop never overtakes a prompt it followed.
+						return this.#inLane(record, async () => {
+							if (isRetired(record)) {
+								connection.reject("unsupported_operation", "session has already been terminated", id);
+								return;
+							}
+							// Ack first: the interrupted outcome is published only after the run has unwound.
+							connection.reply(ackFrame(id));
+							this.#turns.interrupt(record);
+						});
 					},
 				}),
 			],
@@ -281,12 +284,14 @@ export class ControlDaemon {
 							);
 							return;
 						}
-						if (isRetired(record)) {
-							connection.reject("unsupported_operation", "session has already been terminated", id);
-							return;
-						}
-						connection.reply(ackFrame(id));
-						void this.#turns.terminate(record);
+						return this.#inLane(record, async () => {
+							if (isRetired(record)) {
+								connection.reject("unsupported_operation", "session has already been terminated", id);
+								return;
+							}
+							connection.reply(ackFrame(id));
+							void this.#turns.terminate(record);
+						});
 					},
 				}),
 			],
@@ -316,6 +321,8 @@ export class ControlDaemon {
 	/** Dispose every retained session and clear the retention clocks. Called once at shutdown. */
 	async dispose(): Promise<void> {
 		this.#retention.dispose();
+		// Turn deadlines are not unref'd timers; clear them so shutdown is not held open by a running turn.
+		for (const record of this.#registry.all()) clearTimeout(record.turn?.deadline);
 		await this.#registry.disposeAll();
 	}
 
@@ -379,6 +386,11 @@ export class ControlDaemon {
 			return;
 		}
 		await this.#inLane(record, async () => {
+			// A terminate or expiry queued ahead of this prompt may have retired the handle meanwhile.
+			if (isRetired(record)) {
+				connection.reject("unsupported_operation", "session has already been terminated", id);
+				return;
+			}
 			if (command.tools !== undefined) {
 				if (record.turn !== undefined) {
 					connection.reject("invalid_message", "tool bindings cannot change during an active turn", id);

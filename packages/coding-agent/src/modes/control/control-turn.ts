@@ -77,27 +77,38 @@ export class ControlTurnController {
 	 * for each, and retire the handle. A session with a turn in progress is never expired.
 	 */
 	async expireIdle(record: ControlSessionRecord): Promise<void> {
-		if (record.turn !== undefined || record.state !== "idle") return;
-		await this.#children.expireChildren(record);
+		if (record.turn !== undefined || record.state !== "idle" || record.retirement !== undefined) return;
+		// Claim the handle before the first await: a prompt or terminate arriving meanwhile sees it retiring.
+		const { promise, resolve } = Promise.withResolvers<void>();
+		record.retirement = promise;
 		try {
-			await record.session.dispose();
-		} catch (error) {
-			logger.error("control session expiry failed", { sessionId: record.sessionId, error: describeError(error) });
-			this.#retention.armIdle(record.sessionId);
-			return;
+			await this.#children.expireChildren(record);
+			try {
+				await record.session.dispose();
+			} catch (error) {
+				logger.error("control session expiry failed", {
+					sessionId: record.sessionId,
+					error: describeError(error),
+				});
+				record.retirement = undefined;
+				this.#retention.armIdle(record.sessionId);
+				return;
+			}
+			record.state = "expired";
+			const event: ControlEvent = {
+				version: 2,
+				type: "session_expired",
+				sessionId: record.sessionId,
+				at: Date.now(),
+				reason: "idle_ttl",
+			};
+			record.lastOutcome = event;
+			this.#publish(record.principal, event);
+			this.#retention.cancelIdle(record.sessionId);
+			this.#retention.armForget(record.sessionId);
+		} finally {
+			resolve();
 		}
-		record.state = "expired";
-		const event: ControlEvent = {
-			version: 2,
-			type: "session_expired",
-			sessionId: record.sessionId,
-			at: Date.now(),
-			reason: "idle_ttl",
-		};
-		record.lastOutcome = event;
-		this.#publish(record.principal, event);
-		this.#retention.cancelIdle(record.sessionId);
-		this.#retention.armForget(record.sessionId);
 	}
 
 	/**
@@ -153,7 +164,7 @@ export class ControlTurnController {
 	 */
 	terminate(record: ControlSessionRecord): Promise<void> {
 		const turn = record.turn;
-		if (!turn) return this.#retire(record, undefined);
+		if (!turn) return record.retirement ?? this.#retire(record, undefined);
 		// A hard stop overrides an interrupt or deadline already in progress; the run reports it.
 		turn.stop = "terminate";
 		record.session.abort({ reason: "control terminate" }).catch((error: unknown) => {
@@ -178,6 +189,11 @@ export class ControlTurnController {
 			runError = error;
 		}
 		if (turn.settled) return;
+		if (turn.stop !== "terminate") {
+			// Owned child turns settle before the parent's outcome (contract section 5).
+			await this.#children.settleChildren(record);
+			if (turn.settled) return;
+		}
 		if (turn.stop === "terminate") {
 			await this.#retire(record, turn);
 			return;
@@ -213,6 +229,8 @@ export class ControlTurnController {
 	#expireDeadline(record: ControlSessionRecord, turn: ControlTurn): void {
 		if (turn.settled || turn.stop !== undefined) return;
 		turn.stop = "timeout";
+		// Deadline expiry cancels owned work too (contract section 5).
+		this.#children.interruptChildren(record);
 		record.session.abort({ reason: "control turn deadline" }).catch((error: unknown) => {
 			logger.warn("control turn abort after deadline failed", { sessionId: record.sessionId, error: String(error) });
 		});
@@ -267,7 +285,14 @@ export class ControlTurnController {
 	 * When teardown fails, nothing is confirmed: an active turn settles as `teardown_failed`
 	 * and the handle stays as it was, so a later terminate can retry.
 	 */
-	async #retire(record: ControlSessionRecord, turn: ControlTurn | undefined): Promise<void> {
+	#retire(record: ControlSessionRecord, turn: ControlTurn | undefined): Promise<void> {
+		if (record.retirement !== undefined) return record.retirement;
+		const retirement = this.#teardown(record, turn);
+		record.retirement = retirement;
+		return retirement;
+	}
+
+	async #teardown(record: ControlSessionRecord, turn: ControlTurn | undefined): Promise<void> {
 		// Children settle first: their terminal events precede this session's.
 		await this.#children.terminateChildren(record);
 		const usage = turn ? turnUsage(record, turn) : undefined;
@@ -276,6 +301,7 @@ export class ControlTurnController {
 		} catch (error) {
 			const message = describeError(error);
 			logger.error("control session teardown failed", { sessionId: record.sessionId, error: message });
+			record.retirement = undefined;
 			if (turn) {
 				this.#settle(record, turn, () => ({
 					version: 2,

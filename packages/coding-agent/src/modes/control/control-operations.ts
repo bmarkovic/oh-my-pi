@@ -36,13 +36,19 @@ export function defineOperation<C>(definition: ControlOperationDefinition<C>): C
 			connection.reject("unsupported_operation", "subscribe_events must be accepted before this command", id);
 			return;
 		}
-		const outcome = definition.run(connection, id, parsed);
-		if (outcome !== undefined) {
-			outcome.catch((error: unknown) => {
-				logger.error("control command failed", { type: String(raw.type), error: String(error) });
-				connection.reject("invalid_message", `${String(raw.type)} could not be completed`, id);
-			});
+		const failed = (error: unknown) => {
+			logger.error("control command failed", { type: String(raw.type), error: String(error) });
+			connection.reject("invalid_message", `${String(raw.type)} could not be completed`, id);
+		};
+		// A synchronous throw must not escape into the socket's message callback.
+		let outcome: void | Promise<void>;
+		try {
+			outcome = definition.run(connection, id, parsed);
+		} catch (error) {
+			failed(error);
+			return;
 		}
+		if (outcome !== undefined) outcome.catch(failed);
 	};
 }
 

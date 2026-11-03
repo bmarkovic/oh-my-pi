@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import * as http from "node:http";
 import type { Context } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -200,17 +199,16 @@ describe("control child lineage", () => {
 
 	it("gives the child the root's tool bindings, so its tool call carries the root's token", async () => {
 		const received: string[] = [];
-		const endpoint = http.createServer((request, response) => {
-			received.push(String(request.headers.authorization));
-			request.resume();
-			request.on("end", () => {
-				response.setHeader("content-type", "application/json");
-				response.end(JSON.stringify({ found: true }));
-			});
+		const endpoint = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				received.push(String(request.headers.get("authorization")));
+				return Response.json({ found: true });
+			},
 		});
-		await new Promise<void>(resolve => endpoint.listen(0, "127.0.0.1", () => resolve()));
-		cleanups.push(() => new Promise<void>(resolve => endpoint.close(() => resolve())));
-		const port = (endpoint.address() as { port: number }).port;
+		cleanups.push(() => endpoint.stop(true));
+		const port = endpoint.port;
 
 		const mock = scriptedMock(context =>
 			lastRole(context) === "toolResult"

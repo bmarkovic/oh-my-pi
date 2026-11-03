@@ -49,6 +49,8 @@ export interface ControlSessionRecord {
 	lane: Promise<void>;
 	/** The session that spawned this one; `undefined` for a root session. */
 	readonly parentSessionId?: string;
+	/** Set while the handle is being torn down (terminate or idle expiry), so a second teardown or a prompt cannot race it. */
+	retirement?: Promise<void>;
 	/** The last settled outcome or retirement event, reported by `inspect_session` and `reconnect`. */
 	lastOutcome?: ControlEvent;
 	/** Direct children, in creation order, including settled ones. */
@@ -82,6 +84,11 @@ export class ControlSessionRegistry {
 	/** Forget a retired handle entirely: later lookups answer `unknown_session`. */
 	forget(sessionId: string): void {
 		this.#records.delete(sessionId);
+	}
+
+	/** Every record, root and child alike. */
+	all(): ControlSessionRecord[] {
+		return [...this.#records.values()];
 	}
 
 	/** Dispose every retained session. Every dispose settles even when another one fails. */
