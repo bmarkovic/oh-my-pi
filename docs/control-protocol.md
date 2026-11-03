@@ -61,6 +61,7 @@ Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `
 - `create_session.tools` installs the set once the session exists, before the handle is returned. A failed install disposes the new session and creates nothing.
 - Idle `prompt_session.tools` replaces the whole set atomically before the ack. `[]` removes every binding; omitting `tools` keeps the set. During an active turn, `tools` is `invalid_message` and the bindings are unchanged.
 - Each call POSTs the model's JSON input to `endpointUrl` with `Authorization: Bearer <authToken>`. A non-2xx answer is a tool error that names only the status. Response bodies are capped at 16 MiB, and every occurrence of the token in a body is replaced with `[redacted]` before the model sees it. The token never appears in events, logs or errors.
+- The model sees a binding under a provider-safe name: a name already in `[a-zA-Z0-9_-]{1,64}` is kept, any other (such as `git.status`) has its stray characters replaced with `_`, with a numeric suffix when that collides (`git_status`, `git_status_2`). The binding's own name stays its identity on the wire; providers reject dotted tool names, and omp drops replayed calls under them.
 - Installation goes through the session's host-tool refresh, not the extension loader, so it is atomic and can be replaced at an idle boundary.
 
 ## Decisions

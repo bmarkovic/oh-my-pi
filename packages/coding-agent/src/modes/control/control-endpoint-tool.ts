@@ -66,11 +66,43 @@ export function redactToken(text: string, token: string): string {
 	return text.split(token).join(REDACTED);
 }
 
+const PROVIDER_TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/**
+ * The names the model sees for a binding set. Providers declare tools under
+ * `[a-zA-Z0-9_-]{1,64}`, and omp drops replayed calls whose name falls outside it, but the contract's
+ * operation ids are dotted (`git.status`). A conforming name is kept; any other has its stray characters
+ * replaced with `_` and gains a numeric suffix when that collides. The wire name stays the binding's own.
+ */
+export function providerToolNames(names: readonly string[]): string[] {
+	const taken = new Set<string>();
+	const result: Array<string | undefined> = names.map(name => (PROVIDER_TOOL_NAME.test(name) ? name : undefined));
+	for (const name of result) if (name !== undefined) taken.add(name);
+	names.forEach((name, index) => {
+		if (result[index] !== undefined) return;
+		const base = name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+		let candidate = base;
+		for (let attempt = 2; taken.has(candidate); attempt++) {
+			const suffix = `_${attempt}`;
+			candidate = `${base.slice(0, 64 - suffix.length)}${suffix}`;
+		}
+		taken.add(candidate);
+		result[index] = candidate;
+	});
+	return result as string[];
+}
+
+/** A whole binding set as agent tools, each under a name the model's provider accepts. */
+export function createEndpointTools(bindings: readonly ControlToolBinding[]): AgentTool[] {
+	const names = providerToolNames(bindings.map(binding => binding.name));
+	return bindings.map((binding, index) => createEndpointTool(binding, names[index]));
+}
+
 /** One binding as an agent tool: each execution is one authenticated POST to its endpoint. */
-export function createEndpointTool(binding: ControlToolBinding): AgentTool {
+export function createEndpointTool(binding: ControlToolBinding, modelName: string = binding.name): AgentTool {
 	const parameters = fromJsonSchema(binding.schema);
 	return {
-		name: binding.name,
+		name: modelName,
 		label: binding.name,
 		description: binding.description,
 		parameters,

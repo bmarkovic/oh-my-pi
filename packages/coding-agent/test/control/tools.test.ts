@@ -101,6 +101,40 @@ describe("control tool bindings", () => {
 		expect(endpoint.calls).toEqual([{ body: { id: 7 }, authorization: `Bearer ${LOOKUP_TOKEN}` }]);
 	});
 
+	it("exposes a dotted binding name to the model under a provider-safe name and still reaches the endpoint", async () => {
+		const endpoint = startEndpoint(() => Response.json({ clean: true }));
+		const mock = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			handler: context => {
+				const declared = (context.tools ?? []).map(tool => tool.name);
+				const bound = declared.find(name => name.includes("status"));
+				const answered = context.messages.some(message => message.role === "toolResult");
+				if (bound === undefined || answered) return { content: ["done"] };
+				return { content: [{ type: "toolCall" as const, name: bound, arguments: { id: 1 } }] };
+			},
+		});
+		const { client, workspace } = await setup(mock);
+		// Contract section 6 names tools by their dotted operation id; providers accept only [a-zA-Z0-9_-].
+		const sessionId = await createSessionFor(client, workspace.path(), {
+			tools: [
+				lookupBinding(endpoint.url, { name: "git.status" }),
+				lookupBinding(endpoint.url, { name: "git_status", endpointUrl: `${endpoint.url}/other` }),
+			],
+		});
+
+		expect((await client.request(promptFrame("p1", sessionId, "check status"))).type).toBe("ack");
+		expect((await client.next()).type).toBe("session_started");
+		expect(await client.next()).toMatchObject({ type: "session_completed", output: "done" });
+
+		const declared = (mock.calls[0].context.tools ?? [])
+			.map(tool => tool.name)
+			.filter(name => name.includes("status"));
+		expect(declared.sort()).toEqual(["git_status", "git_status_2"]);
+		for (const name of declared) expect(name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+		expect(endpoint.calls).toHaveLength(1);
+	});
+
 	it("rejects a malformed binding set with invalid_message and keeps the previous set working", async () => {
 		const endpoint = startEndpoint(() => Response.json({ found: true }));
 		const mock = createMockModel({

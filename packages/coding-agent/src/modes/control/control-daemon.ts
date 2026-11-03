@@ -10,7 +10,7 @@ import { buildControlCatalog, type ControlCatalogSource, catalogModelId } from "
 import type { ControlPrincipal } from "./control-auth";
 import type { ControlConnection, ControlOperationHandler } from "./control-connection";
 import { CONTROL_OPERATIONS, defineOperation } from "./control-operations";
-import { type ControlToolBinding, createEndpointTool, parseToolBindings } from "./control-endpoint-tool";
+import { type ControlToolBinding, createEndpointTools, parseToolBindings } from "./control-endpoint-tool";
 import type { ControlSessionFactory, ControlSessionHandle } from "./control-session-factory";
 import type { SubagentUiAssignment, SubagentUiChild } from "../../task/types";
 import { ControlChildLedger } from "./control-children";
@@ -314,7 +314,7 @@ export class ControlDaemon {
 				decisions: this.#decisions,
 				parentSessionId: parent.sessionId,
 			}),
-			tools: parent.tools.map(createEndpointTool),
+			tools: createEndpointTools(parent.tools),
 		};
 	}
 
@@ -405,7 +405,7 @@ export class ControlDaemon {
 				}
 				try {
 					// Atomic: the replacement is validated whole before any binding is installed.
-					await record.session.refreshRpcHostTools(bindings.map(createEndpointTool));
+					await record.session.refreshRpcHostTools(createEndpointTools(bindings));
 				} catch (error) {
 					connection.reject(
 						"invalid_message",
@@ -486,7 +486,7 @@ export class ControlDaemon {
 		}
 		if (bindings.length > 0) {
 			try {
-				await handle.session.refreshRpcHostTools(bindings.map(createEndpointTool));
+				await handle.session.refreshRpcHostTools(createEndpointTools(bindings));
 			} catch (error) {
 				logger.warn("control tool bindings could not be installed", { error: String(error) });
 				await handle.session.dispose().catch(() => undefined);
