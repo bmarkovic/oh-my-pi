@@ -4,6 +4,8 @@ export * from "./control-connection";
 export * from "./control-daemon";
 export * from "./control-features";
 export * from "./control-operations";
+export * from "./control-reconcile";
+export * from "./control-retention";
 export * from "./control-serve";
 export * from "./control-server";
 export * from "./control-session-factory";

@@ -17,7 +17,7 @@ import type {
 	ControlTurn,
 	ControlUsageBaseline,
 } from "./control-session-registry";
-import type { ControlUsage } from "./wire/events";
+import type { ControlEvent, ControlUsage } from "./wire/events";
 
 function usageBaseline(session: AgentSession): ControlUsageBaseline {
 	const stats = session.sessionManager.getUsageStatistics();
@@ -122,13 +122,47 @@ export class ControlChildLedger {
 			child.turn = undefined;
 			child.state = "terminated";
 			const usage = turn ? turnUsage(child, turn) : undefined;
-			this.#publish(child.principal, {
+			this.#outcome(child, {
 				version: 2,
 				type: "session_terminated",
 				sessionId: child.sessionId,
 				parentSessionId: parent.sessionId,
 				at: Date.now(),
 				...(usage ? { usage } : {}),
+			});
+		}
+	}
+
+	/** Publish a settled outcome and keep it as the child's last outcome. */
+	#outcome(child: ControlSessionRecord, event: ControlEvent): void {
+		child.lastOutcome = event;
+		this.#publish(child.principal, event);
+	}
+
+	/**
+	 * Expire the idle children of an idle parent that is being expired. A child with
+	 * a turn in progress is left alone; the parent cannot be idle while one runs.
+	 */
+	async expireChildren(parent: ControlSessionRecord): Promise<void> {
+		for (const childId of parent.children) {
+			const child = this.#registry.find(childId);
+			if (!child || child.state !== "idle" || child.turn !== undefined) continue;
+			this.#unsubscribers.get(child.sessionId)?.();
+			this.#unsubscribers.delete(child.sessionId);
+			try {
+				await child.session.dispose();
+			} catch (error) {
+				logger.error("control child expiry failed", { sessionId: child.sessionId, error: String(error) });
+				continue;
+			}
+			child.state = "expired";
+			this.#outcome(child, {
+				version: 2,
+				type: "session_expired",
+				sessionId: child.sessionId,
+				parentSessionId: parent.sessionId,
+				at: Date.now(),
+				reason: "idle_ttl",
 			});
 		}
 	}
@@ -175,12 +209,12 @@ export class ControlChildLedger {
 			at: Date.now(),
 		};
 		if (turn.stop === "interrupt") {
-			this.#publish(child.principal, { ...base, type: "session_interrupted", ...(usage ? { usage } : {}) });
+			this.#outcome(child, { ...base, type: "session_interrupted", ...(usage ? { usage } : {}) });
 			return;
 		}
 		const last = child.session.getLastAssistantMessage();
 		if (last === undefined || last === turn.assistantBaseline) {
-			this.#publish(child.principal, {
+			this.#outcome(child, {
 				...base,
 				type: "session_completed",
 				output: "",
@@ -191,7 +225,7 @@ export class ControlChildLedger {
 		if (last.stopReason === "error" || last.stopReason === "aborted") {
 			const error =
 				last.errorMessage || (last.stopReason === "aborted" ? "turn was aborted" : "model request failed");
-			this.#publish(child.principal, {
+			this.#outcome(child, {
 				...base,
 				type: "session_failed",
 				code: "execution_failed",
@@ -200,7 +234,7 @@ export class ControlChildLedger {
 			});
 			return;
 		}
-		this.#publish(child.principal, {
+		this.#outcome(child, {
 			...base,
 			type: "session_completed",
 			output: assistantText(last),

@@ -201,7 +201,7 @@ describe("control front door: envelope", () => {
 		expect(await subscribe(client, "sub-b")).toEqual({ version: 2, inReplyTo: "sub-b", type: "ack" });
 	});
 
-	it("advertises exactly the features built so far", async () => {
+	it("advertises exactly the mandatory v2 features plus usage", async () => {
 		const server = await start();
 		const client = await open(server.url, server.bearerHeaders);
 		await handshake(client);
@@ -209,7 +209,17 @@ describe("control front door: envelope", () => {
 			version: 2,
 			inReplyTo: "caps",
 			type: "capabilities",
-			features: ["catalog", "steering", "usage", "interrupt", "terminate", "tool_bindings", "decisions"],
+			features: [
+				"catalog",
+				"steering",
+				"usage",
+				"interrupt",
+				"terminate",
+				"tool_bindings",
+				"decisions",
+				"child_lineage",
+				"reconciliation",
+			],
 		});
 	});
 });

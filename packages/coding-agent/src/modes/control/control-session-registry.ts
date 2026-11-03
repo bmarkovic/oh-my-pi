@@ -7,6 +7,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../../session/agent-session";
 import type { ControlPrincipal } from "./control-auth";
 import type { ControlToolBinding } from "./control-endpoint-tool";
+import type { ControlEvent } from "./wire/events";
 
 /** Lifecycle state of a retained handle (contract section 5). */
 export type ControlSessionState = "idle" | "active" | "terminated" | "expired";
@@ -48,6 +49,8 @@ export interface ControlSessionRecord {
 	lane: Promise<void>;
 	/** The session that spawned this one; `undefined` for a root session. */
 	readonly parentSessionId?: string;
+	/** The last settled outcome or retirement event, reported by `inspect_session` and `reconnect`. */
+	lastOutcome?: ControlEvent;
 	/** Direct children, in creation order, including settled ones. */
 	readonly children: string[];
 }
@@ -69,6 +72,16 @@ export class ControlSessionRegistry {
 		const record = this.#records.get(sessionId);
 		if (!record || record.principal !== principal) return undefined;
 		return record;
+	}
+
+	/** Every record `principal` owns, root and child alike, in creation order. */
+	ownedBy(principal: ControlPrincipal): ControlSessionRecord[] {
+		return [...this.#records.values()].filter(record => record.principal === principal);
+	}
+
+	/** Forget a retired handle entirely: later lookups answer `unknown_session`. */
+	forget(sessionId: string): void {
+		this.#records.delete(sessionId);
 	}
 
 	/** Dispose every retained session. Every dispose settles even when another one fails. */

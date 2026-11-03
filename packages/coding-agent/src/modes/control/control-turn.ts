@@ -8,6 +8,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../../session/agent-session";
 import type { ControlPrincipal } from "./control-auth";
 import type { ControlChildLedger } from "./control-children";
+import type { ControlRetention } from "./control-retention";
 import type { ControlDecisionStore } from "./control-decisions";
 import type { ControlSessionRecord, ControlTurn, ControlUsageBaseline } from "./control-session-registry";
 import type { ControlEvent, ControlUsage } from "./wire/events";
@@ -57,11 +58,46 @@ export class ControlTurnController {
 	readonly #publish: ControlPublisher;
 	readonly #decisions: ControlDecisionStore;
 	readonly #children: ControlChildLedger;
+	readonly #retention: ControlRetention;
 
-	constructor(publish: ControlPublisher, decisions: ControlDecisionStore, children: ControlChildLedger) {
+	constructor(
+		publish: ControlPublisher,
+		decisions: ControlDecisionStore,
+		children: ControlChildLedger,
+		retention: ControlRetention,
+	) {
 		this.#publish = publish;
 		this.#decisions = decisions;
 		this.#children = children;
+		this.#retention = retention;
+	}
+
+	/**
+	 * Expire an idle session: dispose it and its idle children, publish `session_expired`
+	 * for each, and retire the handle. A session with a turn in progress is never expired.
+	 */
+	async expireIdle(record: ControlSessionRecord): Promise<void> {
+		if (record.turn !== undefined || record.state !== "idle") return;
+		await this.#children.expireChildren(record);
+		try {
+			await record.session.dispose();
+		} catch (error) {
+			logger.error("control session expiry failed", { sessionId: record.sessionId, error: describeError(error) });
+			this.#retention.armIdle(record.sessionId);
+			return;
+		}
+		record.state = "expired";
+		const event: ControlEvent = {
+			version: 2,
+			type: "session_expired",
+			sessionId: record.sessionId,
+			at: Date.now(),
+			reason: "idle_ttl",
+		};
+		record.lastOutcome = event;
+		this.#publish(record.principal, event);
+		this.#retention.cancelIdle(record.sessionId);
+		this.#retention.armForget(record.sessionId);
 	}
 
 	/**
@@ -80,6 +116,7 @@ export class ControlTurnController {
 		};
 		record.turn = turn;
 		record.state = "active";
+		this.#retention.cancelIdle(record.sessionId);
 		turn.deadline = setTimeout(() => this.#expireDeadline(record, turn), record.timeoutMs);
 		this.#publish(record.principal, {
 			version: 2,
@@ -260,14 +297,18 @@ export class ControlTurnController {
 				...(usage ? { usage } : {}),
 			}));
 		} else {
-			this.#publish(record.principal, {
+			const event: ControlEvent = {
 				version: 2,
 				type: "session_terminated",
 				sessionId: record.sessionId,
 				at: Date.now(),
-			});
+			};
+			record.lastOutcome = event;
+			this.#publish(record.principal, event);
 		}
 		record.state = "terminated";
+		this.#retention.cancelIdle(record.sessionId);
+		this.#retention.armForget(record.sessionId);
 	}
 
 	/** Publish the turn's one outcome and return the session to idle. Later calls are ignored. */
@@ -281,7 +322,10 @@ export class ControlTurnController {
 			record.turn = undefined;
 			record.state = "idle";
 		}
-		this.#publish(record.principal, build());
+		const event = build();
+		record.lastOutcome = event;
+		this.#publish(record.principal, event);
+		if (record.state === "idle") this.#retention.armIdle(record.sessionId);
 	}
 }
 

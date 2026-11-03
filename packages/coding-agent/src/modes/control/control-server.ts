@@ -32,6 +32,8 @@ export interface ControlServerOptions extends ControlCredentials {
 	timing?: Partial<ControlTiming>;
 	/** Command table; defaults to the operations available on this build. */
 	operations?: ReadonlyMap<string, ControlOperationHandler>;
+	/** Told when an authenticated connection opens or closes, for the owner's orphan clock. */
+	onConnection?: (principal: ControlPrincipal, opened: boolean) => void;
 }
 
 export interface ControlServerHandle {
@@ -63,6 +65,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 	}
 	const timing: ControlTiming = { ...DEFAULT_TIMING, ...options.timing };
 	const operations = options.operations ?? CONTROL_OPERATIONS;
+	const onConnection = options.onConnection;
 	const connections = new Set<ControlConnection>();
 
 	const server = Bun.serve<ControlSocketData>({
@@ -94,6 +97,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				ws.data.connection = connection;
 				connections.add(connection);
 				connection.start();
+				onConnection?.(ws.data.principal, true);
 			},
 			message(ws, message) {
 				if (typeof message !== "string") {
@@ -110,6 +114,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				if (!connection) return;
 				connection.dispose();
 				connections.delete(connection);
+				onConnection?.(ws.data.principal, false);
 			},
 		},
 	});

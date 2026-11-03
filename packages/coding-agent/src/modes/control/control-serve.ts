@@ -32,6 +32,7 @@ export async function runControlServe(options: RunControlServeOptions): Promise<
 		bearerToken: options.bearerToken,
 		controlKey: options.controlKey,
 		operations: daemon.operations(),
+		onConnection: (principal, opened) => daemon.connectionChanged(principal, opened),
 	});
 	const stopped = Promise.withResolvers<void>();
 	const unregister = postmortem.register("control-serve", async () => {

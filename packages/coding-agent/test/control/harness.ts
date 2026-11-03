@@ -1,3 +1,4 @@
+import { spyOn } from "bun:test";
 /**
  * Shared harness for the control daemon tests: a real loopback listener, a
  * Bun WebSocket client with a frame queue, and raw-socket helpers for the cases a
@@ -12,6 +13,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type ControlCatalogSource,
 	type ControlOperationHandler,
+	type ControlRetentionTiming,
 	ControlDaemon,
 	type ControlServerHandle,
 	type ControlServerOptions,
@@ -269,6 +271,12 @@ export async function createMockSessionFactory(mock: MockModel): Promise<MockSes
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime(mock.model.provider, "test-key");
 	const modelRegistry = new ModelRegistry(authStorage);
+	// Subagents resolve their model through the registry; the mock model is the only one offered.
+	const find = modelRegistry.find.bind(modelRegistry);
+	spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
+		provider === mock.model.provider && id === mock.model.id ? mock.model : find(provider, id),
+	);
+	spyOn(modelRegistry, "getAvailable").mockImplementation(() => [mock.model]);
 	const requests: ControlSessionRequest[] = [];
 	const sessions: AgentSession[] = [];
 	const factory: ControlSessionFactory = async request => {
@@ -280,13 +288,20 @@ export async function createMockSessionFactory(mock: MockModel): Promise<MockSes
 			disableModelFallback: request.model !== undefined,
 			authStorage,
 			modelRegistry,
-			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
+			// Owned children run synchronously, as the control daemon configures them.
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"todo.enabled": false,
+				"async.enabled": false,
+				modelRoles: { default: `${mock.model.provider}/${mock.model.id}` },
+			}),
 			sessionManager: SessionManager.inMemory(),
 			enableMCP: false,
 			enableLsp: false,
 			disableExtensionDiscovery: true,
 			// Mirrors the control daemon's session options: `ask` is offered, its decisions go to the daemon.
 			interactivePrompts: true,
+			subagentUi: request.subagentUi,
 		});
 		sessions.push(result.session);
 		return { session: result.session, setToolUIContext: result.setToolUIContext };
@@ -313,11 +328,16 @@ export async function startDaemonWith(options: {
 	catalog: ControlCatalogSource;
 	createSession: ControlSessionFactory;
 	daemonCwd: string;
-}): Promise<{ server: TestDaemon; dispose(): Promise<void> }> {
+	retention?: Partial<ControlRetentionTiming>;
+}): Promise<{ server: TestDaemon; control: ControlDaemon; dispose(): Promise<void> }> {
 	const control = new ControlDaemon(options);
-	const server = await startTestDaemon({ operations: control.operations() });
+	const server = await startTestDaemon({
+		operations: control.operations(),
+		onConnection: (principal, opened) => control.connectionChanged(principal, opened),
+	});
 	return {
 		server,
+		control,
 		async dispose() {
 			await server.close();
 			await control.dispose();
@@ -334,11 +354,13 @@ export async function openSubscribedClient(options: {
 	workspace: string;
 	agents?: readonly AgentDefinition[];
 	factory: ControlSessionFactory;
-}): Promise<{ client: TestClient; server: TestDaemon; dispose(): Promise<void> }> {
+	retention?: Partial<ControlRetentionTiming>;
+}): Promise<{ client: TestClient; server: TestDaemon; control: ControlDaemon; dispose(): Promise<void> }> {
 	const started = await startDaemonWith({
 		catalog: staticCatalog([options.mock.model], options.agents ?? []),
 		createSession: options.factory,
 		daemonCwd: options.workspace,
+		retention: options.retention,
 	});
 	const client = await connectClient(started.server.url, started.server.bearerHeaders);
 	await handshake(client);
@@ -346,6 +368,7 @@ export async function openSubscribedClient(options: {
 	return {
 		client,
 		server: started.server,
+		control: started.control,
 		async dispose() {
 			client.close();
 			await started.dispose();

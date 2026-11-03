@@ -7,7 +7,7 @@
  */
 import type { ControlPrincipal } from "./control-auth";
 import type { ControlPublisher } from "./control-turn";
-import type { DecisionOption } from "./wire/events";
+import type { DecisionOption, DecisionRequestedEvent } from "./wire/events";
 
 /** A question as the asking tool poses it. Options are labels; the store assigns their ids. */
 export interface DecisionRequest {
@@ -47,6 +47,7 @@ interface DecisionEntry {
 	readonly resolve: (answer: DecisionAnswer | undefined) => void;
 	readonly question: string;
 	readonly parentSessionId: string | undefined;
+	readonly requestedAt: number;
 }
 
 /** Validate the answer's form against the question: exactly one of an option id or text. */
@@ -72,9 +73,33 @@ export class ControlDecisionStore {
 	readonly #entries = new Map<string, DecisionEntry>();
 	/** The one pending decision of each session. */
 	readonly #pendingBySession = new Map<string, string>();
+	readonly #retentionMs: number;
 
-	constructor(publish: ControlPublisher) {
+	/**
+	 * @param retentionMs how long a settled decision stays answerable for identical retries;
+	 *   beyond it the id is unknown.
+	 */
+	constructor(publish: ControlPublisher, retentionMs: number) {
 		this.#publish = publish;
+		this.#retentionMs = retentionMs;
+	}
+
+	/** The pending decision of `sessionId`, as its `decision_requested` event, if one waits. */
+	pendingFor(sessionId: string): DecisionRequestedEvent | undefined {
+		const decisionId = this.#pendingBySession.get(sessionId);
+		const entry = decisionId === undefined ? undefined : this.#entries.get(decisionId);
+		if (!entry || entry.state !== "pending") return undefined;
+		return {
+			version: 2,
+			type: "decision_requested",
+			sessionId,
+			at: entry.requestedAt,
+			decisionId: entry.decisionId,
+			question: entry.question,
+			options: [...entry.options],
+			allowFreeText: entry.allowFreeText,
+			...(entry.parentSessionId !== undefined ? { parentSessionId: entry.parentSessionId } : {}),
+		};
 	}
 
 	/**
@@ -107,6 +132,7 @@ export class ControlDecisionStore {
 			resolve,
 			question: request.question,
 			parentSessionId: request.parentSessionId,
+			requestedAt: Date.now(),
 		};
 		this.#entries.set(decisionId, entry);
 		this.#pendingBySession.set(sessionId, decisionId);
@@ -137,6 +163,7 @@ export class ControlDecisionStore {
 			const problem = formProblem(entry, command);
 			if (problem !== undefined) return { kind: "rejected", code: "invalid_message", message: problem };
 			entry.state = "answered";
+			this.#forgetAfterRetention(entry.decisionId);
 			entry.answer = command.optionId !== undefined ? { optionId: command.optionId } : { text: command.text ?? "" };
 			entry.answeringUserId = command.answeringUserId;
 			this.#pendingBySession.delete(entry.sessionId);
@@ -176,6 +203,13 @@ export class ControlDecisionStore {
 		if (entry.state !== "pending") return;
 		entry.state = "invalidated";
 		this.#pendingBySession.delete(entry.sessionId);
+		this.#forgetAfterRetention(entry.decisionId);
 		entry.resolve(undefined);
+	}
+
+	/** A settled decision answers identical retries for the retention window, then its id is unknown. */
+	#forgetAfterRetention(decisionId: string): void {
+		const timer = setTimeout(() => this.#entries.delete(decisionId), this.#retentionMs);
+		timer.unref();
 	}
 }

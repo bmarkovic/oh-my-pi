@@ -103,6 +103,45 @@ export function catalogFrame(
 	};
 }
 
+export const inspectSessionCommand = type({
+	type: "'inspect_session'",
+	sessionId: "/\\S/",
+});
+
+export const reconnectCommand = type({
+	type: "'reconnect'",
+	activeSessions: "unknown[]",
+});
+
+/** One requested handle of `reconnect`. Malformed or duplicate entries reject the whole command. */
+export interface ReconnectEntry {
+	sessionId: string;
+	taskRef: string;
+}
+
+export interface SessionInspectedFrame {
+	version: typeof CONTROL_PROTOCOL_VERSION;
+	inReplyTo: string;
+	type: "session_inspected";
+	sessionId: string;
+	snapshot: unknown;
+}
+
+export function sessionInspectedFrame(inReplyTo: string, sessionId: string, snapshot: unknown): SessionInspectedFrame {
+	return { version: CONTROL_PROTOCOL_VERSION, inReplyTo, type: "session_inspected", sessionId, snapshot };
+}
+
+export interface ReconciledFrame {
+	version: typeof CONTROL_PROTOCOL_VERSION;
+	inReplyTo: string;
+	type: "reconciled";
+	sessions: unknown[];
+}
+
+export function reconciledFrame(inReplyTo: string, sessions: unknown[]): ReconciledFrame {
+	return { version: CONTROL_PROTOCOL_VERSION, inReplyTo, type: "reconciled", sessions };
+}
+
 export interface ChildSessionsFrame {
 	version: typeof CONTROL_PROTOCOL_VERSION;
 	inReplyTo: string;

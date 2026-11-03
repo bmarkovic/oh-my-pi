@@ -14,6 +14,16 @@ import { type ControlToolBinding, createEndpointTool, parseToolBindings } from "
 import type { ControlSessionFactory, ControlSessionHandle } from "./control-session-factory";
 import type { SubagentUiAssignment, SubagentUiChild, SubagentUiRouter } from "../../task/types";
 import { ControlChildLedger } from "./control-children";
+import { ControlRetention, type ControlRetentionTiming, DEFAULT_RETENTION_TIMING } from "./control-retention";
+import {
+	reconciledFrame,
+	sessionInspectedFrame,
+	inspectSessionCommand,
+	reconnectCommand,
+	type ReconnectEntry,
+} from "./wire/commands";
+import { snapshotOf, type ControlReconciliationResult } from "./control-reconcile";
+import type { ControlSessionRecord } from "./control-session-registry";
 import { ControlDecisionStore } from "./control-decisions";
 import { createControlExtensionUI } from "./control-ui-context";
 import { ControlSessionRegistry } from "./control-session-registry";
@@ -43,6 +53,13 @@ export interface ControlDaemonOptions {
 	createSession: ControlSessionFactory;
 	/** Directory the catalog's agent discovery runs from. */
 	daemonCwd: string;
+	/** Retention clocks; defaults follow the shared wire profile. */
+	retention?: Partial<ControlRetentionTiming>;
+}
+
+/** A retired handle answers only `unsupported_operation` until it is forgotten. */
+function isRetired(record: ControlSessionRecord): boolean {
+	return record.state === "terminated" || record.state === "expired";
 }
 
 export class ControlDaemon {
@@ -53,6 +70,9 @@ export class ControlDaemon {
 	readonly #turns: ControlTurnController;
 	readonly #decisions: ControlDecisionStore;
 	readonly #children: ControlChildLedger;
+	readonly #retention: ControlRetention;
+	/** Open authenticated connections per principal. */
+	readonly #connections = new Map<ControlPrincipal, number>();
 	/** Connections that subscribed; pruned lazily once closed. */
 	readonly #subscribers = new Set<ControlConnection>();
 
@@ -60,10 +80,31 @@ export class ControlDaemon {
 		this.#catalog = options.catalog;
 		this.#createSession = options.createSession;
 		this.#daemonCwd = options.daemonCwd;
+		const timing: ControlRetentionTiming = { ...DEFAULT_RETENTION_TIMING, ...options.retention };
+		this.#retention = new ControlRetention(timing, {
+			expireIdle: sessionId => this.#expireIdle(sessionId),
+			forget: sessionId => this.#forget(sessionId),
+			reclaimOrphans: principal => this.#reclaimOrphans(principal),
+		});
 		const publish = (principal: ControlPrincipal, frame: ControlEvent) => this.#publish(principal, frame);
-		this.#decisions = new ControlDecisionStore(publish);
+		this.#decisions = new ControlDecisionStore(publish, timing.tombstoneRetentionMs);
 		this.#children = new ControlChildLedger({ publish, decisions: this.#decisions, registry: this.#registry });
-		this.#turns = new ControlTurnController(publish, this.#decisions, this.#children);
+		this.#turns = new ControlTurnController(publish, this.#decisions, this.#children, this.#retention);
+	}
+
+	/**
+	 * A principal's connection opened or closed. When its last connection closes, its
+	 * sessions are reclaimed after the orphan grace period unless it reconnects first.
+	 */
+	connectionChanged(principal: ControlPrincipal, opened: boolean): void {
+		const count = (this.#connections.get(principal) ?? 0) + (opened ? 1 : -1);
+		if (count > 0) {
+			this.#connections.set(principal, count);
+			if (opened) this.#retention.cancelOrphanGrace(principal);
+			return;
+		}
+		this.#connections.delete(principal);
+		this.#retention.armOrphanGrace(principal);
 	}
 
 	/** The command table for this daemon: the base operations plus the session operations. */
@@ -125,6 +166,54 @@ export class ControlDaemon {
 				}),
 			],
 			[
+				"inspect_session",
+				defineOperation({
+					schema: inspectSessionCommand,
+					run: (connection, id, command) => {
+						const record = this.#registry.lookup(connection.principal, command.sessionId);
+						if (!record) {
+							connection.reject("unknown_session", "session is not retained", id);
+							return;
+						}
+						// Side-effect free: inspecting never resets the idle clock or the deadline.
+						connection.reply(
+							sessionInspectedFrame(id, record.sessionId, snapshotOf(record, this.#registry, this.#decisions)),
+						);
+					},
+				}),
+			],
+			[
+				"reconnect",
+				defineOperation({
+					schema: reconnectCommand,
+					requiresSubscription: true,
+					run: (connection, id, command) => {
+						let entries: ReconnectEntry[];
+						try {
+							entries = parseReconnectEntries(command.activeSessions);
+						} catch (error) {
+							connection.reject("invalid_message", describeValidation(error), id);
+							return;
+						}
+						const sessions: ControlReconciliationResult[] = entries.map(entry => {
+							const record = this.#registry.lookup(connection.principal, entry.sessionId);
+							if (!record || record.taskRef !== entry.taskRef || record.parentSessionId !== undefined) {
+								return { sessionId: entry.sessionId, status: "unknown" };
+							}
+							const snapshot = snapshotOf(record, this.#registry, this.#decisions);
+							if (isRetired(record)) return { sessionId: entry.sessionId, status: "completed", snapshot };
+							return {
+								sessionId: entry.sessionId,
+								status: record.turn !== undefined ? "retained_active" : "retained_idle",
+								snapshot,
+							};
+						});
+						// The reply is queued synchronously here, before any later event for these sessions.
+						connection.reply(reconciledFrame(id, sessions));
+					},
+				}),
+			],
+			[
 				"enumerate_child_sessions",
 				defineOperation({
 					schema: enumerateChildSessionsCommand,
@@ -157,7 +246,7 @@ export class ControlDaemon {
 							);
 							return;
 						}
-						if (record.state === "terminated") {
+						if (isRetired(record)) {
 							connection.reject("unsupported_operation", "session has already been terminated", id);
 							return;
 						}
@@ -186,7 +275,7 @@ export class ControlDaemon {
 							);
 							return;
 						}
-						if (record.state === "terminated") {
+						if (isRetired(record)) {
 							connection.reject("unsupported_operation", "session has already been terminated", id);
 							return;
 						}
@@ -218,9 +307,30 @@ export class ControlDaemon {
 		};
 	}
 
-	/** Dispose every retained session. Called once at shutdown. */
+	/** Dispose every retained session and clear the retention clocks. Called once at shutdown. */
 	async dispose(): Promise<void> {
+		this.#retention.dispose();
 		await this.#registry.disposeAll();
+	}
+
+	#expireIdle(sessionId: string): void {
+		const record = this.#registry.find(sessionId);
+		if (record && !isRetired(record)) void this.#turns.expireIdle(record);
+	}
+
+	#forget(sessionId: string): void {
+		const record = this.#registry.find(sessionId);
+		if (!record) return;
+		for (const childId of record.children) this.#registry.forget(childId);
+		this.#registry.forget(sessionId);
+	}
+
+	/** The orphan grace ran out: every root session the principal still owns is terminated. */
+	#reclaimOrphans(principal: ControlPrincipal): void {
+		for (const record of this.#registry.ownedBy(principal)) {
+			if (record.parentSessionId !== undefined || isRetired(record)) continue;
+			void this.#turns.terminate(record);
+		}
 	}
 
 	/** Deliver an event to every subscribed connection of the owning principal. */
@@ -251,7 +361,7 @@ export class ControlDaemon {
 			connection.reject("unsupported_operation", "child sessions are controlled through their parent", id);
 			return;
 		}
-		if (record.state === "terminated") {
+		if (isRetired(record)) {
 			connection.reject("unsupported_operation", "session has already been terminated", id);
 			return;
 		}
@@ -379,9 +489,32 @@ export class ControlDaemon {
 			lane: Promise.resolve(),
 			children: [],
 		});
+		this.#retention.armIdle(sessionId);
 		connection.reply(sessionCreatedFrame(id, sessionId));
 	}
 }
+
+/** Validate `reconnect.activeSessions`: distinct handles, each with a non-blank id and a UUID task ref. */
+function parseReconnectEntries(raw: unknown[]): ReconnectEntry[] {
+	const seen = new Set<string>();
+	return raw.map((entry, index): ReconnectEntry => {
+		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+			throw new Error(`activeSessions[${index}] must be an object`);
+		}
+		const { sessionId, taskRef } = entry as Record<string, unknown>;
+		if (typeof sessionId !== "string" || !/\S/.test(sessionId)) {
+			throw new Error(`activeSessions[${index}].sessionId must be a non-empty string`);
+		}
+		if (typeof taskRef !== "string" || !UUID_RE.test(taskRef)) {
+			throw new Error(`activeSessions[${index}].taskRef must be a UUID`);
+		}
+		if (seen.has(sessionId)) throw new Error("activeSessions must not repeat a session");
+		seen.add(sessionId);
+		return { sessionId, taskRef };
+	});
+}
+
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /** Describe a validation failure without echoing values: binding errors name fields only. */
 function describeValidation(error: unknown): string {

@@ -25,7 +25,7 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 
 ## Catalog and session creation
 
-Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `tool_bindings`, `decisions`, `child_lineage`.
+Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `tool_bindings`, `decisions`, `child_lineage`, `reconciliation`. This is the full v2 set the contract requires, plus `usage`.
 
 - `query_catalog` returns `models` (`{id: "provider/modelId", provider}`) from the process model registry, and `agents` (`{name, description, roles: [], defaultModel?}`) discovered from the daemon's working directory. Prompts and definition paths are never included. `defaultModel` is set only when the agent's first model pattern is exactly a catalog id; looser patterns are omitted rather than guessed. `roles` is empty until agent roles exist.
 - `create_session` needs an accepted `subscribe_events`. `workspacePath` must be an absolute, existing, readable directory (`invalid_workspace` otherwise). `agent` and `model` are exact catalog names and ids (`unknown_agent`, `unknown_model`); an explicit model disables model fallback. Every selection is resolved before anything is created, so a rejected request creates no session.
@@ -83,3 +83,12 @@ Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `
 - `interrupt_session` on the root interrupts its running children, and `terminate_session` on the root disposes them. Each child's terminal event precedes the root's.
 - Control sessions run their subagents synchronously (`async.enabled` is off for the control host), so a root turn does not complete while an owned child is still running.
 - Limits in this build: only direct children are tracked; a grandchild is disposed with its child but has no handle of its own. Child lifecycle is derived from the child's runs, so a child whose run ends without an observable outcome settles on the next quiet check.
+
+## Retention, inspection and reconciliation
+
+- Idle reuse: a session that is idle for 600 000 ms expires, publishing `session_expired{reason: "idle_ttl"}`; its children expire with it. A session with a turn in progress, or waiting on a human, is never expired. The idle clock starts when a session is created or its turn settles.
+- Retired handles (terminated or expired) are retained for 60 000 ms, answering `unsupported_operation`; then they are forgotten and answer `unknown_session`. Settled decisions answer identical retries for the same window.
+- Orphan grace: when a principal's last connection closes, its root sessions are terminated after 60 000 ms unless it reconnects first.
+- `inspect_session` returns the session's `snapshot` (`taskRef`, `status`, `parentSessionId?`, `waitingHumanInput`, `pendingDecisions`, `lastOutcome?`, `descendants`) without changing any clock. An unknown or foreign handle is `unknown_session`.
+- `reconnect {activeSessions: [{sessionId, taskRef}]}` requires an accepted `subscribe_events`. Each requested handle gets one result in request order: `retained_active`, `retained_idle` (with its last outcome), `completed` (a retired handle, status `terminated` or `expired`), or `unknown` (missing, forgotten, owned by another credential, a child, or with a different `taskRef`). A repeated or malformed entry rejects the whole command with `invalid_message`. The reply is queued before any later event for the reattached sessions.
+- Durations use the monotonic clock. Recovery after the daemon itself restarts is not supported; the handles are gone with the process.
