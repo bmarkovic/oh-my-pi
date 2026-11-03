@@ -43,6 +43,8 @@ export function createControlExtensionUI(scope: ControlUIScope): ExtensionUICont
 
 	return {
 		...noOpUIContext,
+		// Steering a control session never answers or cancels its pending question (contract section 4.3).
+		keepsDialogsOnSteer: true,
 		async select(title, items, dialogOptions) {
 			// A control decision answers one option or free text; a multi-select has no such form (note R8).
 			if (dialogOptions?.selectionMarker === "checkbox") {

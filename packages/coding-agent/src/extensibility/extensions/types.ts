@@ -316,6 +316,8 @@ export type ExtensionApprovalAnswer =
 export interface ExtensionUIContext {
 	/** True when selector timeouts start only after the dialog is presented. */
 	timeoutStartsOnPresentation?: boolean;
+	/** True when a message steered into the session leaves an open question waiting for its answer. */
+	keepsDialogsOnSteer?: boolean;
 	/** True when pasteToEditor updates a local or remote composer; absent means unsupported. */
 	supportsEditor?: boolean;
 	/** Show a selector and return the selected label, even when an option also includes a description. */
