@@ -18,6 +18,7 @@
 ### Fixed
 
 - Steering a control session while it waits on a question no longer closes the question: the decision stays pending until it is answered, interrupted, terminated or past its deadline, and the steering reaches the model after the answer
+- Hard-terminating a control session whose subagent is running now reports that child as `session_terminated` only; it no longer sends a `session_failed` for the abort the stop caused just before
 
 ## [18.16.0] - 2026-11-02
 

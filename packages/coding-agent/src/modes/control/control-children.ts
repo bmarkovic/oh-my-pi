@@ -198,6 +198,11 @@ export class ControlChildLedger {
 		});
 	}
 
+	#parentTerminating(child: ControlSessionRecord): boolean {
+		const parent = child.parentSessionId === undefined ? undefined : this.#registry.find(child.parentSessionId);
+		return parent?.turn?.stop === "terminate" || parent?.retirement !== undefined;
+	}
+
 	#settleWhenQuiet(child: ControlSessionRecord): void {
 		const turn = child.turn;
 		if (!turn) return;
@@ -208,6 +213,10 @@ export class ControlChildLedger {
 
 	#settle(child: ControlSessionRecord, turn: ControlTurn): void {
 		if (turn.settled) return;
+		// A hard stop of the parent aborts its running children, and their aborted run reports before the
+		// parent has unwound. The child's one outcome is the session_terminated that terminateChildren
+		// publishes (contract section 4.4), not a failure for the abort that stop caused.
+		if (this.#parentTerminating(child)) return;
 		turn.settled = true;
 		child.turn = undefined;
 		child.state = "idle";
