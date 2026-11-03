@@ -25,10 +25,20 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 
 ## Catalog and session creation
 
-Advertised features: `catalog`.
+Advertised features: `catalog`, `steering`, `usage`.
 
 - `query_catalog` returns `models` (`{id: "provider/modelId", provider}`) from the process model registry, and `agents` (`{name, description, roles: [], defaultModel?}`) discovered from the daemon's working directory. Prompts and definition paths are never included. `defaultModel` is set only when the agent's first model pattern is exactly a catalog id; looser patterns are omitted rather than guessed. `roles` is empty until agent roles exist.
 - `create_session` needs an accepted `subscribe_events`. `workspacePath` must be an absolute, existing, readable directory (`invalid_workspace` otherwise). `agent` and `model` are exact catalog names and ids (`unknown_agent`, `unknown_model`); an explicit model disables model fallback. Every selection is resolved before anything is created, so a rejected request creates no session.
 - Non-empty `tools` are refused with `unsupported_operation` in this build; tool bindings arrive in a later feature.
 - A session factory failure is answered with `invalid_message` and the message `session could not be created`. The contract has no internal-error code, so this is the closest typed rejection; nothing is retained.
 - Handles are opaque UUIDs owned by the credential that created them. Another credential's lookups read as `unknown_session`.
+
+## Turns, steering and usage
+
+- `prompt_session` on an idle session is accepted atomically: the handle becomes active, the turn deadline (`timeoutMs`, default 1 800 000 ms) starts, then `ack` and `session_started` are sent in that order.
+- `prompt_session` on an active session is steering: `ack` only. No second `session_started`, and the deadline is not reset.
+- Each accepted turn settles exactly once: `session_completed{output}` with the final assistant text (empty when the turn produced no assistant output), or `session_failed{code, error}` with `code` `execution_failed` (model error or an aborted run) or `timeout` (the deadline fired; the turn is aborted first). The turn is settled only after the session is quiet, so a steer queued before the run began is part of the same turn.
+- `usage` is the session's own turn delta of provider-reported input, output and total tokens. It is omitted when the provider reported no tokens for the turn.
+- `operatorUserId` is recorded on the turn and never used for authorization.
+- Non-empty `tools` on `prompt_session` are refused with `unsupported_operation` in this build.
+- `prompt_session` requires an accepted `subscribe_events`; a subscribed connection receives the events of the sessions its credential owns.

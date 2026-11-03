@@ -19,6 +19,22 @@ export const createSessionCommand = type({
 	"tools?": "unknown[]",
 });
 
+export const promptSessionCommand = type({
+	type: "'prompt_session'",
+	sessionId: "/\\S/",
+	prompt: "/\\S/",
+	"operatorUserId?": "/\\S/",
+	"tools?": "unknown[]",
+});
+
+export interface PromptSessionCommand {
+	type: "prompt_session";
+	sessionId: string;
+	prompt: string;
+	operatorUserId?: string;
+	tools?: unknown[];
+}
+
 export interface CreateSessionCommand {
 	type: "create_session";
 	workspacePath: string;

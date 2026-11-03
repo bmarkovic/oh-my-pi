@@ -7,14 +7,20 @@ import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { buildControlCatalog, catalogModelId, type ControlCatalogSource } from "./control-catalog";
+import type { ControlPrincipal } from "./control-auth";
 import type { ControlConnection, ControlOperationHandler } from "./control-connection";
 import { CONTROL_OPERATIONS, defineOperation } from "./control-operations";
 import type { ControlSessionFactory, ControlSessionHandle } from "./control-session-factory";
 import { ControlSessionRegistry } from "./control-session-registry";
+import { ControlTurnController } from "./control-turn";
+import { ackFrame, subscribeEventsCommand } from "./wire/envelope";
+import type { ControlEvent } from "./wire/events";
 import {
 	type CreateSessionCommand,
 	catalogFrame,
 	createSessionCommand,
+	type PromptSessionCommand,
+	promptSessionCommand,
 	queryCatalogCommand,
 	sessionCreatedFrame,
 } from "./wire/commands";
@@ -34,17 +40,40 @@ export class ControlDaemon {
 	readonly #createSession: ControlSessionFactory;
 	readonly #daemonCwd: string;
 	readonly #registry = new ControlSessionRegistry();
+	readonly #turns: ControlTurnController;
+	/** Connections that subscribed; pruned lazily once closed. */
+	readonly #subscribers = new Set<ControlConnection>();
 
 	constructor(options: ControlDaemonOptions) {
 		this.#catalog = options.catalog;
 		this.#createSession = options.createSession;
 		this.#daemonCwd = options.daemonCwd;
+		this.#turns = new ControlTurnController((principal, frame) => this.#publish(principal, frame));
 	}
 
 	/** The command table for this daemon: the base operations plus the session operations. */
 	operations(): ReadonlyMap<string, ControlOperationHandler> {
 		return new Map<string, ControlOperationHandler>([
 			...CONTROL_OPERATIONS,
+			[
+				"subscribe_events",
+				defineOperation({
+					schema: subscribeEventsCommand,
+					run: (connection, id) => {
+						connection.subscribe();
+						this.#subscribers.add(connection);
+						connection.reply(ackFrame(id));
+					},
+				}),
+			],
+			[
+				"prompt_session",
+				defineOperation({
+					schema: promptSessionCommand,
+					requiresSubscription: true,
+					run: (connection, id, command) => this.#promptSession(connection, id, command),
+				}),
+			],
 			[
 				"query_catalog",
 				defineOperation({
@@ -69,6 +98,42 @@ export class ControlDaemon {
 	/** Dispose every retained session. Called once at shutdown. */
 	async dispose(): Promise<void> {
 		await this.#registry.disposeAll();
+	}
+
+	/** Deliver an event to every subscribed connection of the owning principal. */
+	#publish(principal: ControlPrincipal, frame: ControlEvent): void {
+		for (const connection of this.#subscribers) {
+			if (connection.closed) {
+				this.#subscribers.delete(connection);
+				continue;
+			}
+			if (connection.principal === principal && connection.subscribed) connection.reply(frame);
+		}
+	}
+
+	async #promptSession(connection: ControlConnection, id: string, command: PromptSessionCommand): Promise<void> {
+		const record = this.#registry.lookup(connection.principal, command.sessionId);
+		if (!record) {
+			connection.reject("unknown_session", "session is not retained", id);
+			return;
+		}
+		if (command.tools !== undefined && command.tools.length > 0) {
+			connection.reject("unsupported_operation", "tool bindings are not supported by this build", id);
+			return;
+		}
+		if (record.turn !== undefined) {
+			try {
+				await this.#turns.steer(record, command.prompt);
+			} catch (error) {
+				connection.reject("unsupported_operation", `steering was refused: ${String(error)}`, id);
+				return;
+			}
+			connection.reply(ackFrame(id));
+			return;
+		}
+		// Ack first: the turn starts synchronously after it, so no await separates the state change from the ack.
+		connection.reply(ackFrame(id));
+		this.#turns.start(record, command.prompt, command.operatorUserId);
 	}
 
 	async #createSessionFor(connection: ControlConnection, id: string, command: CreateSessionCommand): Promise<void> {

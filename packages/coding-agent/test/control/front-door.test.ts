@@ -209,7 +209,7 @@ describe("control front door: envelope", () => {
 			version: 2,
 			inReplyTo: "caps",
 			type: "capabilities",
-			features: ["catalog"],
+			features: ["catalog", "steering", "usage"],
 		});
 	});
 });

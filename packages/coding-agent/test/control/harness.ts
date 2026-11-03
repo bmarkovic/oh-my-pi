@@ -319,3 +319,50 @@ export async function startDaemonWith(options: {
 		},
 	};
 }
+
+/**
+ * Start a daemon around `mock`, connect a bearer client, handshake and subscribe.
+ * Use `createSession` to build a session for the workspace.
+ */
+export async function openSubscribedClient(options: {
+	mock: MockModel;
+	workspace: string;
+	agents?: readonly AgentDefinition[];
+	factory: ControlSessionFactory;
+}): Promise<{ client: TestClient; server: TestDaemon; dispose(): Promise<void> }> {
+	const started = await startDaemonWith({
+		catalog: staticCatalog([options.mock.model], options.agents ?? []),
+		createSession: options.factory,
+		daemonCwd: options.workspace,
+	});
+	const client = await connectClient(started.server.url, started.server.bearerHeaders);
+	await handshake(client);
+	await subscribe(client);
+	return {
+		client,
+		server: started.server,
+		async dispose() {
+			client.close();
+			await started.dispose();
+		},
+	};
+}
+
+/** Create a session through the client and return its handle. */
+export async function createSessionFor(
+	client: TestClient,
+	workspace: string,
+	extra: Record<string, unknown> = {},
+): Promise<string> {
+	const reply = await client.request({
+		version: 2,
+		id: `create-${crypto.randomUUID()}`,
+		type: "create_session",
+		workspacePath: workspace,
+		taskRef: "00000000-0000-4000-8000-0000000000aa",
+		model: "mock/model-a",
+		...extra,
+	});
+	if (reply.type !== "session_created") throw new Error(`create failed: ${JSON.stringify(reply)}`);
+	return String(reply.sessionId);
+}

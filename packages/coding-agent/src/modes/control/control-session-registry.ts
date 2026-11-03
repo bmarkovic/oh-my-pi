@@ -10,6 +10,28 @@ import type { ControlPrincipal } from "./control-auth";
 /** Lifecycle state of a retained handle (contract section 5). */
 export type ControlSessionState = "idle" | "active" | "terminated" | "expired";
 
+/** Counters read from the session manager when a turn starts; usage is the delta from these. */
+export interface ControlUsageBaseline {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+}
+
+/** One accepted turn until its single settled outcome. */
+export interface ControlTurn {
+	readonly operatorUserId: string | undefined;
+	readonly usageBaseline: ControlUsageBaseline;
+	/** The last assistant message when the turn started; a different one at the end means the turn produced output. */
+	readonly assistantBaseline: unknown;
+	/** The turn deadline fired; the outcome is then `timeout` whatever the run reports. */
+	deadlineExpired: boolean;
+	/** Set once the turn's outcome has been published. */
+	settled: boolean;
+	deadline: Timer | undefined;
+}
+
 export interface ControlSessionRecord {
 	readonly sessionId: string;
 	readonly principal: ControlPrincipal;
@@ -17,6 +39,8 @@ export interface ControlSessionRecord {
 	readonly timeoutMs: number;
 	state: ControlSessionState;
 	readonly session: AgentSession;
+	/** Present while a turn is accepted and unsettled. */
+	turn?: ControlTurn;
 }
 
 export class ControlSessionRegistry {
