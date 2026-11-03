@@ -60,7 +60,23 @@ function describe(
 	};
 }
 
-/** Snapshot of one session and its direct children, parent before child. */
+/** Every descendant of `record`, depth-first pre-order, so each parent precedes its children. */
+function collectDescendants(
+	record: ControlSessionRecord,
+	registry: ControlSessionRegistry,
+	decisions: ControlDecisionStore,
+	into: ControlDescendantSnapshot[],
+): void {
+	for (const childId of record.children) {
+		const child = registry.find(childId);
+		if (!child || child.parentSessionId === undefined) continue;
+		const childState = describe(child, decisions);
+		into.push({ sessionId: child.sessionId, parentSessionId: child.parentSessionId, ...childState });
+		collectDescendants(child, registry, decisions, into);
+	}
+}
+
+/** Snapshot of one session and every descendant, parent before child (depth-first pre-order). */
 export function snapshotOf(
 	record: ControlSessionRecord,
 	registry: ControlSessionRegistry,
@@ -68,12 +84,7 @@ export function snapshotOf(
 ): ControlSessionSnapshot {
 	const own = describe(record, decisions);
 	const descendants: ControlDescendantSnapshot[] = [];
-	for (const childId of record.children) {
-		const child = registry.find(childId);
-		if (!child || child.parentSessionId === undefined) continue;
-		const childState = describe(child, decisions);
-		descendants.push({ sessionId: child.sessionId, parentSessionId: child.parentSessionId, ...childState });
-	}
+	collectDescendants(record, registry, decisions, descendants);
 	return {
 		taskRef: record.taskRef,
 		...own,

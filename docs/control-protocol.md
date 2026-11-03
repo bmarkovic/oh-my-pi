@@ -103,14 +103,16 @@ Advertised features: `catalog`, `steering`, `usage`, `interrupt`, `terminate`, `
 
 ## Child lineage
 
-- A subagent that a root control session spawns becomes a child handle when its session is built, before any of its activity. Its `session_started` carries `parentSessionId` set to the root's handle, and every later child event carries the same field.
+- A subagent that a control session spawns becomes a child handle when its session is built, before any of its activity, at any depth. Its `session_started` carries `parentSessionId` set to its immediate parent's handle (the root for a direct child, the child for a grandchild), and every later event of that handle carries the same field. Events of every depth are delivered on the root's connection; the client finds the root by walking `parentSessionId` back through the handles it has seen.
 - Each child run settles once: `session_completed{output}` with the child's final text, `session_failed` on a model error, `session_interrupted` when the parent was interrupted, or `session_terminated` when the parent was terminated. The child's `usage` counts only its own run.
 - A child's `ask` questions are decisions whose events carry the child's handle and `parentSessionId`. Its tools use the parent's tool bindings, so a bound endpoint receives the parent's token.
-- `enumerate_child_sessions` lists the direct children of a handle in creation order, including settled ones. An unknown handle is `unknown_session`.
-- `prompt_session`, `interrupt_session` and `terminate_session` on a child return `unsupported_operation`; the child keeps running and changes nothing.
-- `interrupt_session` on the root interrupts its running children, and `terminate_session` on the root disposes them. Each child's terminal event precedes the root's.
+- `enumerate_child_sessions` lists the direct children of a handle in creation order, including settled ones. A child handle lists its own children. An unknown handle is `unknown_session`.
+- A grandchild's tools are the root's bindings, unchanged, and its questions are decisions with its own handle. Its depth is bounded by the runtime's subagent recursion limit (two levels by default).
+- `prompt_session`, `interrupt_session` and `terminate_session` on a child at any depth return `unsupported_operation`; the child keeps running and changes nothing.
+- `interrupt_session` on the root interrupts its running descendants, and `terminate_session` on the root disposes them. Each descendant's terminal event precedes its parent's, so the order is deepest first, then the root.
+- `reconnect` returns a root's snapshot with `descendants` for the whole subtree, depth-first pre-order, so every parent precedes its children. Each descendant names its immediate parent.
 - Control sessions run their subagents synchronously (`async.enabled` is off for the control host), so a root turn does not complete while an owned child is still running.
-- Limits in this build: only direct children are tracked; a grandchild is disposed with its child but has no handle of its own. Child lifecycle is derived from the child's runs, so a child whose run ends without an observable outcome settles on the next quiet check.
+- Limits in this build: a subagent that a restored (revived) child spawns runs headless, without a handle. Child lifecycle is derived from the child's runs, so a child whose run ends without an observable outcome settles on the next quiet check.
 
 ## Retention, inspection and reconciliation
 

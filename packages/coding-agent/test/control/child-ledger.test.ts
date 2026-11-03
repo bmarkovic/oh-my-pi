@@ -53,6 +53,7 @@ function parentRecord(session: FakeChildSession): ControlSessionRecord {
 		session: session as unknown as AgentSession,
 		tools: [],
 		lane: Promise.resolve(),
+		rootSessionId: "parent",
 		children: [],
 	};
 }

@@ -49,11 +49,13 @@ export interface ControlSessionRecord {
 	lane: Promise<void>;
 	/** The session that spawned this one; `undefined` for a root session. */
 	readonly parentSessionId?: string;
+	/** The root of this handle's tree (its own id for a root). Events route to the connections attached to it. */
+	readonly rootSessionId: string;
 	/** Set while the handle is being torn down (terminate or idle expiry), so a second teardown or a prompt cannot race it. */
 	retirement?: Promise<void>;
 	/** The last settled outcome or retirement event, reported by `inspect_session` and `reconnect`. */
 	lastOutcome?: ControlEvent;
-	/** Direct children, in creation order, including settled ones. */
+	/** Direct children, in creation order, including settled ones. Grandchildren are listed on their own parent. */
 	readonly children: string[];
 }
 

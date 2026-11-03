@@ -324,7 +324,10 @@ export class ControlDaemon {
 				decisions: this.#decisions,
 				parentSessionId: parent.sessionId,
 			}),
+			// The root's bindings, inherited unchanged at every depth: a grandchild never gets broader authority.
 			tools: createEndpointTools(parent.tools),
+			// The child's own spawns route to this child's handle, so grandchildren are handles at any depth.
+			subagentUi: grandchild => this.#routeSubagent(childId, grandchild),
 		};
 	}
 
@@ -341,10 +344,11 @@ export class ControlDaemon {
 		if (record && !isRetired(record)) void this.#turns.expireIdle(record);
 	}
 
+	/** Forget a handle and every descendant, deepest first. */
 	#forget(sessionId: string): void {
 		const record = this.#registry.find(sessionId);
 		if (!record) return;
-		for (const childId of record.children) this.#registry.forget(childId);
+		for (const childId of record.children) this.#forget(childId);
 		this.#registry.forget(sessionId);
 	}
 
@@ -362,7 +366,8 @@ export class ControlDaemon {
 	 * events anywhere, until `reconnect` reclaims it and its snapshot is sent (contract section 2.4).
 	 */
 	#publish(principal: ControlPrincipal, frame: ControlEvent): ControlEvent {
-		const rootId = frame.parentSessionId ?? frame.sessionId;
+		// A handle at any depth routes through its root, which is the handle connections attach to.
+		const rootId = this.#registry.find(frame.sessionId)?.rootSessionId ?? frame.parentSessionId ?? frame.sessionId;
 		for (const connection of this.#subscribers) {
 			if (connection.closed) {
 				this.#subscribers.delete(connection);
@@ -525,6 +530,7 @@ export class ControlDaemon {
 			session: handle.session,
 			tools: bindings,
 			lane: Promise.resolve(),
+			rootSessionId: sessionId,
 			children: [],
 		});
 		this.#retention.armIdle(sessionId);

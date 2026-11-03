@@ -350,6 +350,8 @@ export interface SubagentUiChild {
 export interface SubagentUiAssignment {
 	uiContext: ExtensionUIContext;
 	tools: AgentTool[];
+	/** Routes the child's own subagent spawns, so grandchildren get the same UI and tools. Absent: they run headless. */
+	subagentUi?: SubagentUiRouter;
 }
 
 /**
