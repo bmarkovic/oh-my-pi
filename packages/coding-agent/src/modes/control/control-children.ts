@@ -146,8 +146,7 @@ export class ControlChildLedger {
 
 	/** Publish a settled outcome and keep it as the child's last outcome. */
 	#outcome(child: ControlSessionRecord, event: ControlEvent): void {
-		child.lastOutcome = event;
-		this.#publish(child.principal, event);
+		child.lastOutcome = this.#publish(child.principal, event);
 	}
 
 	/**

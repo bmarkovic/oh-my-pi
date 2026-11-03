@@ -13,8 +13,11 @@ import type { ControlDecisionStore } from "./control-decisions";
 import type { ControlSessionRecord, ControlTurn, ControlUsageBaseline } from "./control-session-registry";
 import type { ControlEvent, ControlUsage } from "./wire/events";
 
-/** Publishes one server event to the subscribed connections of a principal. */
-export type ControlPublisher = (principal: ControlPrincipal, frame: ControlEvent) => void;
+/**
+ * Publishes one server event to the subscribed connections of a principal. Returns the event as delivered
+ * (elided when it was oversize); a caller that keeps the event stores that returned form.
+ */
+export type ControlPublisher = (principal: ControlPrincipal, frame: ControlEvent) => ControlEvent;
 
 interface UsageSource {
 	getUsageStatistics(): ControlUsageBaseline;
@@ -102,8 +105,7 @@ export class ControlTurnController {
 				at: Date.now(),
 				reason: "idle_ttl",
 			};
-			record.lastOutcome = event;
-			this.#publish(record.principal, event);
+			record.lastOutcome = this.#publish(record.principal, event);
 			this.#retention.cancelIdle(record.sessionId);
 			this.#retention.armForget(record.sessionId);
 		} finally {
@@ -329,8 +331,7 @@ export class ControlTurnController {
 				sessionId: record.sessionId,
 				at: Date.now(),
 			};
-			record.lastOutcome = event;
-			this.#publish(record.principal, event);
+			record.lastOutcome = this.#publish(record.principal, event);
 		}
 		record.state = "terminated";
 		this.#retention.cancelIdle(record.sessionId);
@@ -348,9 +349,7 @@ export class ControlTurnController {
 			record.turn = undefined;
 			record.state = "idle";
 		}
-		const event = build();
-		record.lastOutcome = event;
-		this.#publish(record.principal, event);
+		record.lastOutcome = this.#publish(record.principal, build());
 		if (record.state === "idle") this.#retention.armIdle(record.sessionId);
 	}
 }

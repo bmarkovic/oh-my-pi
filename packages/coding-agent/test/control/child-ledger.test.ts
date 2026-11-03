@@ -62,8 +62,11 @@ describe("control child ledger", () => {
 		const published: ControlEvent[] = [];
 		const registry = new ControlSessionRegistry();
 		const ledger = new ControlChildLedger({
-			publish: (_principal, event) => published.push(event),
-			decisions: new ControlDecisionStore(() => {}, 60_000),
+			publish: (_principal, event) => {
+				published.push(event);
+				return event;
+			},
+			decisions: new ControlDecisionStore((_principal, event) => event, 60_000),
 			registry,
 		});
 		const parent = parentRecord(new FakeChildSession());

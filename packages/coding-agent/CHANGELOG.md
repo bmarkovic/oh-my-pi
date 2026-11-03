@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- A control event whose text exceeds the 16 MiB message limit, such as a long final answer or a long question, is cut to fit and marked with an `elided` list, instead of killing the connection; the cut event is what `inspect_session` and `reconnect` report
 - A slow control client no longer loses acknowledgements or final outcomes silently: frames queue per connection in order and, past 64 MiB of backlog, the daemon closes the connection with 1013 so the client can reconnect and reconcile
 - `omp control serve` refuses a `--token-file` or `--key-file` that other accounts can read (any group or other permission bit, or another owner) and exits 1 naming the file and its mode; the credential is never printed
 - Steering a control session while it waits on a question no longer closes the question: the decision stays pending until it is answered, interrupted, terminated or past its deadline, and the steering reaches the model after the answer

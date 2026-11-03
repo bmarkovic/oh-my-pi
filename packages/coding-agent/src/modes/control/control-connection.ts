@@ -6,7 +6,13 @@
 import { OmpErrors } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ControlPrincipal } from "./control-auth";
-import { CONTROL_PROTOCOL_VERSION, helloCommand, isPlainObject, welcomeFrame } from "./wire/envelope";
+import {
+	CONTROL_MAX_MESSAGE_BYTES,
+	CONTROL_PROTOCOL_VERSION,
+	helloCommand,
+	isPlainObject,
+	welcomeFrame,
+} from "./wire/envelope";
 import { type ControlErrorCode, controlError } from "./wire/errors";
 
 /**
@@ -57,6 +63,8 @@ export interface ControlConnectionOptions {
 const CLOSE_PROTOCOL_ERROR = 1002;
 const CLOSE_POLICY_VIOLATION = 1008;
 const CLOSE_GOING_AWAY = 1001;
+/** A frame could not be made to fit the message limit: a defect the client must not receive. */
+const CLOSE_INTERNAL_ERROR = 1011;
 /** IANA "Try Again Later": transient transport loss, the peer should reconnect. */
 const CLOSE_TRY_AGAIN_LATER = 1013;
 /** How long a closing connection may take to complete its close handshake before the socket is torn down. */
@@ -142,7 +150,16 @@ export class ControlConnection {
 	/** Send one server frame, in order behind any frame still queued. Dropped once the connection is closed. */
 	reply(frame: object): void {
 		if (this.#closed) return;
-		this.#enqueue(JSON.stringify(frame));
+		const text = JSON.stringify(frame);
+		const bytes = Buffer.byteLength(text, "utf8");
+		if (bytes > CONTROL_MAX_MESSAGE_BYTES) {
+			// Elision keeps every event within the limit, so a frame still over it is a defect. Never send it.
+			const type = isPlainObject(frame) && typeof frame.type === "string" ? frame.type : undefined;
+			logger.error("control frame exceeds the message limit; closing", { type, bytes });
+			this.#fail(CLOSE_INTERNAL_ERROR, "frame exceeds the message limit");
+			return;
+		}
+		this.#enqueue(text, bytes);
 	}
 
 	/**
@@ -162,12 +179,11 @@ export class ControlConnection {
 		}
 	}
 
-	#enqueue(text: string): void {
+	#enqueue(text: string, bytes: number): void {
 		if (this.#outbound.length === 0 && this.#socket.bufferedAmount() <= this.#outboundLimits.highWaterBytes) {
 			this.#transmit(text);
 			return;
 		}
-		const bytes = Buffer.byteLength(text, "utf8");
 		if (this.#outboundBytes + bytes > this.#outboundLimits.queueLimitBytes) {
 			// The peer cannot keep up. Nothing after the delivered prefix is sent; the client reconnects and reconciles.
 			logger.warn("control connection outbound backlog exceeded", { principal: this.principal });

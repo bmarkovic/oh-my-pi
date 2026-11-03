@@ -42,7 +42,8 @@ import {
 	sessionCreatedFrame,
 	terminateSessionCommand,
 } from "./wire/commands";
-import { ackFrame, subscribeEventsCommand } from "./wire/envelope";
+import { ackFrame, CONTROL_MAX_MESSAGE_BYTES, subscribeEventsCommand } from "./wire/envelope";
+import { cutEmbeddedEvents, elideEvent, frameBytes, reconciliationSnapshots } from "./wire/elision";
 import type { ControlEvent } from "./wire/events";
 
 /** Turn budget when `create_session` omits `timeoutMs` (contract section 2.2). */
@@ -86,7 +87,7 @@ export class ControlDaemon {
 			forget: sessionId => this.#forget(sessionId),
 			reclaimOrphans: principal => this.#reclaimOrphans(principal),
 		});
-		const publish = (principal: ControlPrincipal, frame: ControlEvent) => this.#publish(principal, frame);
+		const publish = (principal: ControlPrincipal, frame: ControlEvent) => this.#publish(principal, elideEvent(frame));
 		this.#decisions = new ControlDecisionStore(publish, timing.tombstoneRetentionMs);
 		this.#children = new ControlChildLedger({ publish, decisions: this.#decisions, registry: this.#registry });
 		this.#turns = new ControlTurnController(publish, this.#decisions, this.#children, this.#retention);
@@ -176,9 +177,11 @@ export class ControlDaemon {
 							return;
 						}
 						// Side-effect free: inspecting never resets the idle clock or the deadline.
-						connection.reply(
-							sessionInspectedFrame(id, record.sessionId, snapshotOf(record, this.#registry, this.#decisions)),
-						);
+						// The snapshot is a copy, so cutting its embedded events for the message limit leaves the records intact.
+						const snapshot = structuredClone(snapshotOf(record, this.#registry, this.#decisions));
+						const reply = () => sessionInspectedFrame(id, record.sessionId, snapshot);
+						cutEmbeddedEvents([snapshot], () => frameBytes(reply()) <= CONTROL_MAX_MESSAGE_BYTES);
+						connection.reply(reply());
 					},
 				}),
 			],
@@ -215,7 +218,14 @@ export class ControlDaemon {
 							for (const other of this.#subscribers) if (other !== connection) other.detach(result.sessionId);
 							connection.attach(result.sessionId);
 						}
-						connection.reply(reconciledFrame(id, sessions));
+						// Copies, so cutting embedded events for the message limit leaves the records intact.
+						const copies = structuredClone(sessions);
+						const reply = () => reconciledFrame(id, copies);
+						cutEmbeddedEvents(
+							reconciliationSnapshots(copies),
+							() => frameBytes(reply()) <= CONTROL_MAX_MESSAGE_BYTES,
+						);
+						connection.reply(reply());
 					},
 				}),
 			],
@@ -351,7 +361,7 @@ export class ControlDaemon {
 	 * its root session. A session whose connection was lost stays detached, and receives no live
 	 * events anywhere, until `reconnect` reclaims it and its snapshot is sent (contract section 2.4).
 	 */
-	#publish(principal: ControlPrincipal, frame: ControlEvent): void {
+	#publish(principal: ControlPrincipal, frame: ControlEvent): ControlEvent {
 		const rootId = frame.parentSessionId ?? frame.sessionId;
 		for (const connection of this.#subscribers) {
 			if (connection.closed) {
@@ -362,6 +372,7 @@ export class ControlDaemon {
 				connection.reply(frame);
 			}
 		}
+		return frame;
 	}
 
 	/** Run one prompt-class command after every earlier command on the same session. */

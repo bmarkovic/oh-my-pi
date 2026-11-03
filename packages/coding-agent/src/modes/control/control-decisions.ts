@@ -7,6 +7,8 @@
  */
 import type { ControlPrincipal } from "./control-auth";
 import type { ControlPublisher } from "./control-turn";
+import { CONTROL_MAX_MESSAGE_BYTES } from "./wire/envelope";
+import { elideDecisionRequested, frameBytes } from "./wire/elision";
 import type { DecisionOption, DecisionRequestedEvent } from "./wire/events";
 
 /** A question as the asking tool poses it. Options are labels; the store assigns their ids. */
@@ -46,6 +48,7 @@ interface DecisionEntry {
 	answeringUserId: string | undefined;
 	readonly resolve: (answer: DecisionAnswer | undefined) => void;
 	readonly question: string;
+	readonly elided: string[] | undefined;
 	readonly parentSessionId: string | undefined;
 	readonly requestedAt: number;
 }
@@ -98,6 +101,7 @@ export class ControlDecisionStore {
 			question: entry.question,
 			options: [...entry.options],
 			allowFreeText: entry.allowFreeText,
+			...(entry.elided !== undefined ? { elided: entry.elided } : {}),
 			...(entry.parentSessionId !== undefined ? { parentSessionId: entry.parentSessionId } : {}),
 		};
 	}
@@ -119,34 +123,45 @@ export class ControlDecisionStore {
 			label: option.label,
 			...(option.description !== undefined ? { description: option.description } : {}),
 		}));
+		// The stored question is the delivered one, so a snapshot shows what the client was sent.
+		const delivered = elideDecisionRequested(
+			{
+				version: 2,
+				type: "decision_requested",
+				sessionId,
+				at: Date.now(),
+				decisionId,
+				question: request.question,
+				options,
+				allowFreeText: request.allowFreeText,
+				...(request.parentSessionId !== undefined ? { parentSessionId: request.parentSessionId } : {}),
+			},
+			CONTROL_MAX_MESSAGE_BYTES,
+		);
+		// A decision that cannot fit a frame even with its labels cut to one code point is not asked: the tool
+		// gets the same refusal as an unsupported question, so the turn continues without an unanswerable decision.
+		if (frameBytes(delivered) > CONTROL_MAX_MESSAGE_BYTES) {
+			return Promise.reject(new Error("decision is too large for a control frame"));
+		}
 		const { promise, resolve } = Promise.withResolvers<DecisionAnswer | undefined>();
 		const entry: DecisionEntry = {
 			decisionId,
 			sessionId,
 			principal,
-			options,
+			options: delivered.options,
 			allowFreeText: request.allowFreeText,
 			state: "pending",
 			answer: undefined,
 			answeringUserId: undefined,
 			resolve,
-			question: request.question,
+			question: delivered.question,
+			elided: delivered.elided,
 			parentSessionId: request.parentSessionId,
-			requestedAt: Date.now(),
+			requestedAt: delivered.at,
 		};
 		this.#entries.set(decisionId, entry);
 		this.#pendingBySession.set(sessionId, decisionId);
-		this.#publish(principal, {
-			version: 2,
-			type: "decision_requested",
-			sessionId,
-			at: Date.now(),
-			decisionId,
-			question: request.question,
-			options,
-			allowFreeText: request.allowFreeText,
-			...(request.parentSessionId !== undefined ? { parentSessionId: request.parentSessionId } : {}),
-		});
+		this.#publish(principal, delivered);
 		const signal = request.signal;
 		if (signal?.aborted) this.#invalidate(entry);
 		else signal?.addEventListener("abort", () => this.#invalidate(entry), { once: true });

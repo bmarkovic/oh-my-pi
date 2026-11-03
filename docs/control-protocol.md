@@ -6,7 +6,7 @@
 
 - Listener: `ws://127.0.0.1:<port>/control` on loopback (`127.0.0.0/8`, `::1`, `localhost`). Any other path returns 404. A non-loopback host is refused unless TLS is configured, in which case the listener serves `wss://` (see TLS).
 - Credentials: an upgrade must carry exactly one of `Authorization: Bearer <token>` or `X-Omp-Control-Key: <key>`. Missing, both, wrong, or any `token`, `key` or `access_token` query parameter returns HTTP 401 and no WebSocket is opened. Each configured credential is one control principal, and a handle is visible only to the principal that created it. Credential bytes are never logged or sent in a frame.
-- Frames: each message is one UTF-8 JSON object in a text frame, at most 16 MiB. Binary frames close with 1003. Messages above the limit close with 1009.
+- Frames: each message is one UTF-8 JSON object in a text frame, at most 16 MiB. Binary frames close with 1003. Messages above the limit close with 1009 on the way in. On the way out, an oversize event is elided rather than sent over the limit (see Oversize events).
 - Handshake: the first command must be `hello`. A proposal with no version 2 is answered with `version_mismatch` and closed with 1002. A silent client is closed with 1008 after 10 seconds.
 - Outbound: replies and events share one FIFO queue per connection, so an acknowledgement is always sent before the events that follow it. While the transport is congested, frames wait in the queue and go out in order once it drains. Pings are not queued and are skipped while frames wait. If the queue would exceed 64 MiB, the daemon drops nothing silently: it sends no further frames and closes with 1013 `outbound backlog exceeded`. Frames delivered before the close form a gap-free prefix. The client reconnects and calls `reconnect` for the authoritative state; sessions are retained as for any transport loss.
 - Heartbeat: a ping every 15 seconds. No inbound frame or pong for 45 seconds closes the connection as transport loss.
@@ -23,6 +23,17 @@ omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>]
 - On start, stdout carries exactly one line: the `ws://` URL including `/control`.
 - SIGINT and SIGTERM close the listener and dispose every session before the process exits with the signal's status.
 - The launch's other flags (for example `--approval-mode`) apply to the sessions the daemon creates.
+
+## Oversize events
+
+- A server frame whose UTF-8 size would exceed 16 MiB is cut until it fits. Frames within the limit are never changed.
+- Elidable fields: `session_completed.output`, `session_failed.error`, `decision_answered.text`. For `decision_requested`, in order: `context` is removed entirely, then `question` is cut, then each option `label` is cut to an equal byte share (never less than its first code point).
+- Never changed or dropped: `version`, `type`, `sessionId`, `parentSessionId`, `at`, `inReplyTo`, `code`, `usage`, `reason`, `decisionId`, every `optionId`, the number and order of options, and `allowFreeText`. No event is suppressed.
+- Cuts keep a prefix and never split a code point. Each cut event carries `elided`: RFC 6901 JSON Pointers of the changed fields, for example `["/output"]`. The field is absent when nothing was cut. Clients that ignore unknown fields keep working.
+- The cut event is the one stored as the session's last outcome and as its pending decision, so `inspect_session` and `reconnect` agree with what was delivered.
+- A decision that cannot fit a frame even with its labels cut to one code point is not asked: the `ask` tool receives an error, and the turn continues.
+- In a reply that embeds events (`session_inspected`, `reconciled`) that is over the limit, the embedded events are cut to at most 4 KiB each, descendants last to first and then the root's own event, until the reply fits. Records keep their ids and statuses.
+- The daemon never sends a frame that is still over the limit after this. If one is produced, it logs an error and closes the connection with 1011.
 
 ## TLS
 
