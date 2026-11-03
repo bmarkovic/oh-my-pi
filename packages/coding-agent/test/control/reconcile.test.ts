@@ -136,6 +136,32 @@ describe("control retention and reconciliation", () => {
 		});
 	});
 
+	it("does not present the previous turn's outcome in the snapshot of a session running a new turn", async () => {
+		const mock = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			responses: [{ content: ["first"] }, { content: ["second"], delayMs: 400 }],
+		});
+		const { opened, dir } = await setup(mock);
+		const sessionId = await createSessionFor(opened.client, dir.path());
+		await opened.client.request({ version: 2, id: "p1", type: "prompt_session", sessionId, prompt: "one" });
+		await nextMatching(opened.client, frame => frame.type === "session_completed");
+		await opened.client.request({ version: 2, id: "p2", type: "prompt_session", sessionId, prompt: "two" });
+		await nextMatching(opened.client, frame => frame.type === "session_started");
+		opened.client.close();
+
+		const successor = await reconnectingClient(opened.server.url, opened.server.bearerHeaders);
+		const reconciled = await successor.request({
+			version: 2,
+			id: "r-stale",
+			type: "reconnect",
+			activeSessions: [{ sessionId, taskRef: "00000000-0000-4000-8000-0000000000aa" }],
+		});
+		const [entry] = reconciled.sessions as Array<Record<string, unknown>>;
+		expect(entry).toMatchObject({ status: "retained_active" });
+		expect(entry.snapshot).not.toHaveProperty("lastOutcome");
+	});
+
 	it("reports a turn that completed while disconnected as retained_idle with its outcome", async () => {
 		const mock = createMockModel({
 			provider: "mock",

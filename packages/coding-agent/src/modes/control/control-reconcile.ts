@@ -50,11 +50,13 @@ function describe(
 } {
 	const pending = decisions.pendingFor(record.sessionId);
 	const pendingDecisions = pending ? [pending] : [];
+	const status = statusOf(record);
 	return {
-		status: statusOf(record),
+		status,
 		waitingHumanInput: pendingDecisions.length > 0,
 		pendingDecisions,
-		...(record.lastOutcome !== undefined ? { lastOutcome: record.lastOutcome } : {}),
+		// An active turn has no outcome yet; the previous turn's would read as this turn's.
+		...(record.lastOutcome !== undefined && status !== "active" ? { lastOutcome: record.lastOutcome } : {}),
 	};
 }
 
