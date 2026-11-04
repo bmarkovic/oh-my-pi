@@ -30,7 +30,7 @@ export default class Control extends Command {
 	static flags = {
 		bind: Flags.string({
 			description:
-				"Listen address as host:port (port 0 picks a free port); a non-loopback host needs --tls-cert and --tls-key",
+				"Listen address as host:port (port 0 picks a free port); a non-loopback host needs --tls-cert and --tls-key, and a wildcard address such as 0.0.0.0 is refused",
 			default: DEFAULT_BIND,
 		}),
 		"token-file": Flags.string({
