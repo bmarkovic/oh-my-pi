@@ -558,6 +558,13 @@ export class ControlDaemon {
 				return;
 			}
 		}
+		// Shutdown may have started while the session was being built. It already stopped the sessions it knew,
+		// so registering this one would leave it to be disposed without an outcome.
+		if (this.#draining) {
+			await handle.session.dispose().catch(() => undefined);
+			connection.reject("unsupported_operation", "daemon is shutting down", id);
+			return;
+		}
 		// Questions the session's tools ask a human become decisions owned by this principal.
 		handle.setToolUIContext(
 			createControlExtensionUI({ sessionId, principal: connection.principal, decisions: this.#decisions }),

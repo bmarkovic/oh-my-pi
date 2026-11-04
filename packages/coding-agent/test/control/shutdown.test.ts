@@ -190,6 +190,56 @@ describe("control daemon shutdown", () => {
 		await stopping;
 	}, 30_000);
 
+	it("refuses a create_session still being built when shutdown starts, and disposes what it built", async () => {
+		const mock = createMockModel({ provider: "mock", id: "model-a", responses: [{ content: ["idle"] }] });
+		const dir = TempDir.createSync("@control-shutdown-late-create-");
+		dirs.push(dir);
+		const mockFactory: MockSessionFactory = await createMockSessionFactory(mock);
+		cleanups.push(() => mockFactory.cleanup());
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let built = 0;
+		let disposals = 0;
+		const opened = await openSubscribedClient({
+			mock,
+			workspace: dir.path(),
+			factory: async request => {
+				entered.resolve();
+				await release.promise;
+				const handle = await mockFactory.factory(request);
+				built++;
+				const dispose = handle.session.dispose.bind(handle.session);
+				spyOn(handle.session, "dispose").mockImplementation(async () => {
+					disposals++;
+					await dispose();
+				});
+				return handle;
+			},
+		});
+		cleanups.push(() => opened.dispose());
+
+		const pending = opened.client.request({
+			version: 2,
+			id: "late-create",
+			type: "create_session",
+			workspacePath: dir.path(),
+			taskRef: "00000000-0000-4000-8000-0000000000aa",
+			model: "mock/model-a",
+		});
+		await entered.promise;
+		opened.server.stopAccepting();
+		await opened.control.shutdown();
+		release.resolve();
+
+		expect(await pending).toMatchObject({
+			type: "error",
+			code: "unsupported_operation",
+			message: "daemon is shutting down",
+		});
+		expect(built).toBe(1);
+		expect(disposals).toBe(1);
+	}, 30_000);
+
 	it("returns within the deadline when a session's dispose never settles, and still closes its sockets 1001", async () => {
 		const mock = createMockModel({ provider: "mock", id: "model-a", responses: [{ content: ["idle"] }] });
 		const { client, server, control, workspace, factory } = await setup(mock);
