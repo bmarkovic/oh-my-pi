@@ -120,6 +120,38 @@ describe("control turns", () => {
 		expect(await client.next()).toMatchObject({ type: "session_completed", output: "after" });
 	}, 15_000);
 
+	it("keeps a turn budget past the 32-bit timer range instead of expiring it at once", async () => {
+		const mock = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			responses: [{ content: ["finished"], delayMs: 300 }],
+		});
+		const { client, dir } = await setup(mock);
+		// 3e9 ms is a valid positive safe integer (about 35 days); a timer given it directly fires after 1 ms.
+		const sessionId = await createSessionFor(client, dir.path(), { timeoutMs: 3_000_000_000 });
+
+		await client.request(promptFrame("p1", sessionId, "slow"));
+		expect((await client.next()).type).toBe("session_started");
+		expect(await client.next()).toMatchObject({ type: "session_completed", sessionId, output: "finished" });
+	}, 15_000);
+
+	it("rejects a zero or fractional timeoutMs at create_session, so no turn can start with an instant deadline", async () => {
+		const mock = createMockModel({ provider: "mock", id: "model-a", responses: [{ content: ["unused"] }] });
+		const { client, dir } = await setup(mock);
+		for (const timeoutMs of [0, 0.5, -1]) {
+			const reply = await client.request({
+				version: 2,
+				id: `create-${timeoutMs}`,
+				type: "create_session",
+				workspacePath: dir.path(),
+				taskRef: "00000000-0000-4000-8000-0000000000aa",
+				model: "mock/model-a",
+				timeoutMs,
+			});
+			expect(reply).toMatchObject({ type: "error", code: "invalid_message" });
+		}
+	});
+
 	it("keeps two sessions in two workspaces independent, each event carrying its own sessionId", async () => {
 		const mock = createMockModel({
 			provider: "mock",

@@ -24,6 +24,9 @@ import type { ControlEvent, ControlUsage } from "./wire/events";
  */
 export type ControlPublisher = (principal: ControlPrincipal, frame: ControlEvent) => ControlEvent;
 
+/** Longest delay a timer accepts: 32-bit signed milliseconds. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 interface UsageSource {
 	getUsageStatistics(): ControlUsageBaseline;
 }
@@ -135,7 +138,7 @@ export class ControlTurnController {
 		record.turn = turn;
 		record.state = "active";
 		this.#retention.cancelIdle(record.sessionId);
-		turn.deadline = setTimeout(() => this.#expireDeadline(record, turn), record.timeoutMs);
+		this.#armDeadline(record, turn, record.timeoutMs);
 		this.#publish(record.principal, {
 			version: 2,
 			type: "session_started",
@@ -261,6 +264,19 @@ export class ControlTurnController {
 			return;
 		}
 		this.#settleCompleted(record, turn, assistantText(last));
+	}
+
+	/**
+	 * Arm the turn deadline `remainingMs` from now. A timer cannot wait longer than {@link MAX_TIMER_DELAY_MS}
+	 * (a longer delay fires after 1 ms), so a longer budget is waited out in hops; `turn.deadline` is always
+	 * the pending hop, which is what settling clears.
+	 */
+	#armDeadline(record: ControlSessionRecord, turn: ControlTurn, remainingMs: number): void {
+		const delay = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+		turn.deadline = setTimeout(() => {
+			if (remainingMs > delay) this.#armDeadline(record, turn, remainingMs - delay);
+			else this.#expireDeadline(record, turn);
+		}, delay);
 	}
 
 	#expireDeadline(record: ControlSessionRecord, turn: ControlTurn): void {
