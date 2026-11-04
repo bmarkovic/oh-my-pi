@@ -102,6 +102,17 @@ describe("oversize event elision", () => {
 		expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(1);
 	});
 
+	it("keeps the question nonempty when an oversize label is what pushes the frame over the limit", () => {
+		const delivered = elideDecisionRequested(question("Which way?", ["L".repeat(20 * MIB), "Beta"]), L);
+		expect(frameBytes(delivered)).toBeLessThanOrEqual(L);
+		// The client rejects an empty question, so the cut leaves at least the first code point.
+		expect(delivered.question.length).toBeGreaterThan(0);
+		expect("Which way?".startsWith(delivered.question)).toBe(true);
+		expect(delivered.elided).toContain("/options/0/label");
+		expect(delivered.options.map(option => option.optionId)).toEqual(["0", "1"]);
+		expect(delivered.options[1].label).toBe("Beta");
+	});
+
 	it("cuts a 17 MiB answer text and records the pointer", () => {
 		const answered: ControlEvent = {
 			version: 2,

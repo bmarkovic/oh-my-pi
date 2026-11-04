@@ -82,6 +82,11 @@ export function elideEvent(event: ControlEvent, limit: number = CONTROL_MAX_MESS
 	}
 }
 
+/** The first code point of `value` (a whole surrogate pair), or `""` for an empty string. */
+function firstCodePoint(value: string): string {
+	return value.length === 0 ? "" : String.fromCodePoint(value.codePointAt(0) ?? 0);
+}
+
 /** `existing` plus one pointer, in the order the cuts were made. */
 function pointersWith(existing: string[] | undefined, pointer: string): string[] {
 	return [...(existing ?? []), pointer];
@@ -110,10 +115,13 @@ export function elideDecisionRequested(event: DecisionRequestedEvent, limit: num
 
 	const base = working;
 	const questionMarks = [...pointers, "/question"];
-	const question = longestFittingPrefix(
+	// When the labels alone keep the frame over the limit no prefix of the question fits, but the question
+	// is required and nonempty, so it keeps its first code point and the labels are cut next.
+	const fittingQuestion = longestFittingPrefix(
 		base.question,
 		candidate => frameBytes(withPointers({ ...base, question: candidate }, questionMarks)) <= limit,
 	);
+	const question = fittingQuestion.length > 0 ? fittingQuestion : firstCodePoint(base.question);
 	if (question !== base.question) pointers.push("/question");
 	working = { ...base, question };
 	if (frameBytes(withPointers(working, pointers)) <= limit) return withPointers(working, pointers);
@@ -124,8 +132,7 @@ export function elideDecisionRequested(event: DecisionRequestedEvent, limit: num
 	const slack = limit - frameBytes(withPointers({ ...labelBase, options: emptyLabels }, labelMarks));
 	const share = labelBase.options.length === 0 ? 0 : Math.floor(slack / labelBase.options.length);
 	const options = labelBase.options.map((option, index) => {
-		const firstCodePoint = option.label.length === 0 ? "" : String.fromCodePoint(option.label.codePointAt(0) ?? 0);
-		const budget = Math.max(share, frameBytes(firstCodePoint));
+		const budget = Math.max(share, frameBytes(firstCodePoint(option.label)));
 		const label = longestFittingPrefix(option.label, candidate => frameBytes(candidate) <= budget);
 		if (label !== option.label) pointers.push(`/options/${index}/label`);
 		return { ...option, label };
