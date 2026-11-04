@@ -87,9 +87,10 @@ function firstCodePoint(value: string): string {
 	return value.length === 0 ? "" : String.fromCodePoint(value.codePointAt(0) ?? 0);
 }
 
-/** `existing` plus one pointer, in the order the cuts were made. */
+/** `existing` plus one pointer, in the order the cuts were made. A field cut again is listed once. */
 function pointersWith(existing: string[] | undefined, pointer: string): string[] {
-	return [...(existing ?? []), pointer];
+	const pointers = existing ?? [];
+	return pointers.includes(pointer) ? pointers : [...pointers, pointer];
 }
 
 /**
@@ -101,7 +102,14 @@ function pointersWith(existing: string[] | undefined, pointer: string): string[]
  */
 export function elideDecisionRequested(event: DecisionRequestedEvent, limit: number): DecisionRequestedEvent {
 	if (frameBytes(event) <= limit) return event;
-	const pointers: string[] = [];
+	// An event already cut (a stored decision cut again for an embedded reply) keeps the pointers it has.
+	const pointers: string[] = [...(event.elided ?? [])];
+	const known = new Set(pointers);
+	const addPointer = (pointer: string): void => {
+		if (known.has(pointer)) return;
+		known.add(pointer);
+		pointers.push(pointer);
+	};
 	const withPointers = (candidate: DecisionRequestedEvent, marks: string[]): DecisionRequestedEvent =>
 		marks.length > 0 ? { ...candidate, elided: marks } : candidate;
 
@@ -109,12 +117,12 @@ export function elideDecisionRequested(event: DecisionRequestedEvent, limit: num
 	if (working.context !== undefined) {
 		const { context: _dropped, ...withoutContext } = working;
 		working = withoutContext;
-		pointers.push("/context");
+		addPointer("/context");
 		if (frameBytes(withPointers(working, pointers)) <= limit) return withPointers(working, pointers);
 	}
 
 	const base = working;
-	const questionMarks = [...pointers, "/question"];
+	const questionMarks = pointersWith(pointers, "/question");
 	// When the labels alone keep the frame over the limit no prefix of the question fits, but the question
 	// is required and nonempty, so it keeps its first code point and the labels are cut next.
 	const fittingQuestion = longestFittingPrefix(
@@ -122,19 +130,20 @@ export function elideDecisionRequested(event: DecisionRequestedEvent, limit: num
 		candidate => frameBytes(withPointers({ ...base, question: candidate }, questionMarks)) <= limit,
 	);
 	const question = fittingQuestion.length > 0 ? fittingQuestion : firstCodePoint(base.question);
-	if (question !== base.question) pointers.push("/question");
+	if (question !== base.question) addPointer("/question");
 	working = { ...base, question };
 	if (frameBytes(withPointers(working, pointers)) <= limit) return withPointers(working, pointers);
 
 	const labelBase = working;
 	const emptyLabels = labelBase.options.map(option => ({ ...option, label: "" }));
-	const labelMarks = [...pointers, ...labelBase.options.map((_option, index) => `/options/${index}/label`)];
+	const labelPointers = labelBase.options.map((_option, index) => `/options/${index}/label`);
+	const labelMarks = [...pointers, ...labelPointers.filter(pointer => !known.has(pointer))];
 	const slack = limit - frameBytes(withPointers({ ...labelBase, options: emptyLabels }, labelMarks));
 	const share = labelBase.options.length === 0 ? 0 : Math.floor(slack / labelBase.options.length);
 	const options = labelBase.options.map((option, index) => {
 		const budget = Math.max(share, frameBytes(firstCodePoint(option.label)));
 		const label = longestFittingPrefix(option.label, candidate => frameBytes(candidate) <= budget);
-		if (label !== option.label) pointers.push(`/options/${index}/label`);
+		if (label !== option.label) addPointer(`/options/${index}/label`);
 		return { ...option, label };
 	});
 	return withPointers({ ...labelBase, options }, pointers);

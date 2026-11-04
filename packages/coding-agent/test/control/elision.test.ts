@@ -113,6 +113,24 @@ describe("oversize event elision", () => {
 		expect(delivered.options[1].label).toBe("Beta");
 	});
 
+	it("lists a field once when an event that was already cut is cut again for an embedded reply", () => {
+		const delivered = elideEvent(completed("a".repeat(17 * MIB)));
+		const embedded = elideEvent(delivered, 4_096);
+		expect(frameBytes(embedded)).toBeLessThanOrEqual(4_096);
+		expect(embedded).toMatchObject({ type: "session_completed", elided: ["/output"] });
+	});
+
+	it("keeps the pointers a decision already carries when it is cut again", () => {
+		const delivered = elideDecisionRequested(
+			{ ...question("Which way?", ["Alpha", "Beta"]), context: { notes: "c".repeat(17 * MIB) } },
+			L,
+		);
+		expect(delivered.elided).toEqual(["/context"]);
+		const embedded = elideDecisionRequested({ ...delivered, question: "q".repeat(8_192) }, 4_096);
+		expect(frameBytes(embedded)).toBeLessThanOrEqual(4_096);
+		expect(embedded.elided).toEqual(["/context", "/question"]);
+	});
+
 	it("cuts a 17 MiB answer text and records the pointer", () => {
 		const answered: ControlEvent = {
 			version: 2,
