@@ -18,7 +18,7 @@
 omp control serve [--bind <host:port>] [--token-file <path>] [--key-file <path>] [--tls-cert <path> --tls-key <path>]
 ```
 
-- `--bind` defaults to `127.0.0.1:0` (a free loopback port). Non-loopback hosts need `--tls-cert` and `--tls-key`; wildcard addresses (`0.0.0.0`, `::`) are refused even with TLS.
+- `--bind` defaults to `127.0.0.1:0` (a free loopback port). Non-loopback hosts need `--tls-cert` and `--tls-key`; wildcard addresses (`0.0.0.0`, `::`, and other spellings of them such as `0` or `::0`) are refused even with TLS.
 - Credentials come from `--token-file` or `OMP_CONTROL_TOKEN` (bearer) and `--key-file` or `OMP_CONTROL_KEY` (control key). At least one is required; otherwise the command prints a message on stderr and exits 1. Credential files must be owner-only (see Credential files).
 - On start, stdout carries exactly one line: the `ws://` URL including `/control`.
 - SIGINT and SIGTERM run the shutdown described in Shutdown, then the process exits with the signal's status (130 for SIGINT, 143 for SIGTERM). SIGHUP also shuts down, exiting 129, so run the daemon under a supervisor or `nohup` if the terminal may hang up.

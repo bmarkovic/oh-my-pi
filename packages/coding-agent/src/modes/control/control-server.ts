@@ -89,7 +89,23 @@ export function isLoopbackHost(host: string): boolean {
 	return match !== null && match.slice(1).every(octet => Number(octet) <= 255);
 }
 
-const WILDCARD_HOSTS: ReadonlySet<string> = new Set(["", "0.0.0.0", "::"]);
+/** Canonical forms of the addresses that listen on every interface. */
+const WILDCARD_ADDRESSES: ReadonlySet<string> = new Set(["0.0.0.0", "[::]", "[::ffff:0:0]"]);
+
+/**
+ * True when `hostname` listens on every interface in any spelling the listener's resolver accepts: `0`,
+ * `0x0` and `0.0` all bind 0.0.0.0, and `::0` or `0:0:0:0:0:0:0:0` bind `::`. The URL parser reduces
+ * those spellings to one canonical form.
+ */
+function isWildcardHost(hostname: string): boolean {
+	if (hostname === "") return true;
+	try {
+		const bracketed = hostname.includes(":") ? `[${hostname}]` : hostname;
+		return WILDCARD_ADDRESSES.has(new URL(`http://${bracketed}`).hostname);
+	} catch {
+		return false;
+	}
+}
 
 /**
  * Why the listener may not bind `hostname`, or `undefined` when it may. Loopback is allowed with or
@@ -99,7 +115,7 @@ const WILDCARD_HOSTS: ReadonlySet<string> = new Set(["", "0.0.0.0", "::"]);
 export function bindPolicy(hostname: string, tls: boolean): string | undefined {
 	if (isLoopbackHost(hostname)) return undefined;
 	if (!tls) return `--bind ${hostname} is a non-loopback address; pass --tls-cert and --tls-key`;
-	if (WILDCARD_HOSTS.has(hostname)) {
+	if (isWildcardHost(hostname)) {
 		return `--bind ${hostname} is a wildcard address; bind a specific interface address or host name so the printed URL can be dialed and its certificate checked`;
 	}
 	return undefined;

@@ -92,6 +92,17 @@ describe("control daemon over TLS", () => {
 			}),
 		).rejects.toThrow(/wildcard/);
 	});
+
+	it("refuses a numeric spelling of the wildcard address too, rather than listening on every interface", async () => {
+		await expect(
+			startControlServer({
+				bearerToken: BEARER_TOKEN,
+				hostname: "0",
+				port: 0,
+				tls: { certFile: CERT_FILE, keyFile: await ownerOnlyKey() },
+			}),
+		).rejects.toThrow(/wildcard/);
+	});
 });
 
 describe("bindPolicy", () => {
@@ -104,6 +115,16 @@ describe("bindPolicy", () => {
 		{ host: "0.0.0.0", tls: false, refused: true },
 		{ host: "0.0.0.0", tls: true, refused: true },
 		{ host: "::", tls: true, refused: true },
+		// Other spellings of the same wildcard addresses: the listener binds every interface for each of these.
+		{ host: "0", tls: true, refused: true },
+		{ host: "0.0", tls: true, refused: true },
+		{ host: "0x0", tls: true, refused: true },
+		{ host: "::0", tls: true, refused: true },
+		{ host: "0:0:0:0:0:0:0:0", tls: true, refused: true },
+		{ host: "::ffff:0.0.0.0", tls: true, refused: true },
+		{ host: "10.0.0.5", tls: true, refused: false },
+		{ host: "fd00::5", tls: true, refused: false },
+		{ host: "daemon.example.net", tls: true, refused: false },
 	])("host $host with tls=$tls is refused: $refused", ({ host, tls, refused }) => {
 		expect(bindPolicy(host, tls) !== undefined).toBe(refused);
 	});
