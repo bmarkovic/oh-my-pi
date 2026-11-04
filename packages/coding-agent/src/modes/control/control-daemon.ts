@@ -350,11 +350,9 @@ export class ControlDaemon {
 		this.#retention.dispose();
 		const roots = this.#registry.all().filter(record => record.parentSessionId === undefined && !isRetired(record));
 		const stopping = Promise.allSettled(roots.map(root => this.#inLane(root, () => this.#turns.shutdown(root))));
-		let timer: Timer | undefined;
-		const deadline = new Promise<"deadline">(resolve => {
-			timer = setTimeout(() => resolve("deadline"), options.deadlineMs ?? DEFAULT_SHUTDOWN_DEADLINE_MS);
-		});
-		const outcome = await Promise.race([stopping.then(() => "stopped" as const), deadline]);
+		const deadline = Promise.withResolvers<"deadline">();
+		const timer = setTimeout(() => deadline.resolve("deadline"), options.deadlineMs ?? DEFAULT_SHUTDOWN_DEADLINE_MS);
+		const outcome = await Promise.race([stopping.then(() => "stopped" as const), deadline.promise]);
 		clearTimeout(timer);
 		if (outcome === "deadline") {
 			logger.warn("control daemon shutdown deadline reached; disposing remaining sessions", {
