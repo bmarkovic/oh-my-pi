@@ -9,7 +9,7 @@ import type { ControlReconciliationResult, ControlSessionSnapshot } from "../con
 import { CONTROL_MAX_MESSAGE_BYTES } from "./envelope";
 import type { ControlEvent, DecisionRequestedEvent } from "./events";
 
-/** Size of an embedded event inside a reply that is itself over the limit (contract note R6, rule 7). */
+/** Size of an embedded event inside a reply that is itself over the limit (embedded events in replies, contract section 7). */
 export const EMBEDDED_EVENT_LIMIT_BYTES = 4_096;
 
 /** UTF-8 size of a value's serialized JSON. */
