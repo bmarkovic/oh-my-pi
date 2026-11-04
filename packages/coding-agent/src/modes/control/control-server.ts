@@ -17,7 +17,11 @@ import {
 	DEFAULT_OUTBOUND_LIMITS,
 	type ControlTiming,
 } from "./control-connection";
-import { type ControlCredentialFiles, ControlCredentialWatch } from "./control-credential-file";
+import {
+	assertPrivateCredentialFile,
+	type ControlCredentialFiles,
+	ControlCredentialWatch,
+} from "./control-credential-file";
 import { CONTROL_OPERATIONS } from "./control-operations";
 import { CONTROL_MAX_MESSAGE_BYTES } from "./wire/envelope";
 
@@ -131,6 +135,8 @@ export async function startControlServer(options: ControlServerOptions): Promise
 	const hostname = options.hostname ?? "127.0.0.1";
 	const bindProblem = bindPolicy(hostname, options.tls !== undefined);
 	if (bindProblem !== undefined) throw new Error(`control server refuses to start: ${bindProblem}`);
+	// The private key is a credential: the listener refuses one other accounts can read, whoever started it.
+	if (options.tls !== undefined) await assertPrivateCredentialFile(options.tls.keyFile);
 	const files = options.credentialFiles;
 	const watch =
 		files !== undefined && (files.bearerTokenFile !== undefined || files.controlKeyFile !== undefined)

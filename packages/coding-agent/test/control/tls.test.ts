@@ -93,6 +93,26 @@ describe("control daemon over TLS", () => {
 		).rejects.toThrow(/wildcard/);
 	});
 
+	it("refuses to listen with a TLS key that other accounts can read, naming the file but not its bytes", async () => {
+		const keyFile = await ownerOnlyKey();
+		await fs.chmod(keyFile, 0o644);
+		const error = await startControlServer({
+			bearerToken: BEARER_TOKEN,
+			tls: { certFile: CERT_FILE, keyFile },
+		}).then(
+			handle => {
+				cleanups.push(() => handle.close());
+				return undefined;
+			},
+			(caught: unknown) => caught,
+		);
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toContain(keyFile);
+		expect(message).toContain("0644");
+		expect(message).not.toContain("PRIVATE KEY");
+	});
+
 	it("refuses a numeric spelling of the wildcard address too, rather than listening on every interface", async () => {
 		await expect(
 			startControlServer({
