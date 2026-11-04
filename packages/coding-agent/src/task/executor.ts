@@ -3943,6 +3943,7 @@ interface SubagentLaunchInputs {
 	workPoolYieldItems: readonly WorkPoolYieldItem[];
 	resolveServiceTierByFamily?: CreateAgentSessionOptions["resolveServiceTierByFamily"];
 	onFirstChatDispatch?: () => void;
+	subagentUi?: SubagentUiRouter;
 }
 
 /** Names of the child's explicitly supplied tools; they win over same-named MCP proxies on every rebind. */
@@ -3971,6 +3972,7 @@ function buildSubagentSessionOptions(
 		expectedAgentRef,
 		resolveServiceTierByFamily: launch?.resolveServiceTierByFamily,
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
+		subagentUi: launch?.subagentUi,
 		// A launch prompts its assignment only after setup; a revive's turns are its IRC wakes.
 		awaitingAssignment: launch !== undefined,
 		systemPrompt: defaultPrompt => {
@@ -4874,6 +4876,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				: undefined;
 			let session: AgentSession;
 			let sessionPromise: Promise<CreateAgentSessionResult> | undefined;
+			// A host's router for this child's own spawns. The host binds it once the child exists (see below), so
+			// a grandchild is routed to the host's scope for the child, not to the spawning session.
+			let nestedSubagentUi: SubagentUiRouter | undefined;
+			const childSubagentUi: SubagentUiRouter | undefined = options.subagentUi
+				? child => nestedSubagentUi?.(child)
+				: undefined;
 			try {
 				sessionPromise = createAgentSession(
 					buildSubagentSessionOptions(sessionSpec, subagentSettings, sessionManager, null, {
@@ -4885,6 +4893,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						onFirstChatDispatch: () => {
 							firstChatDispatchAt ??= performance.now();
 						},
+						subagentUi: childSubagentUi,
 					}),
 				);
 				const created = await awaitAbortable(sessionPromise);
@@ -4892,6 +4901,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				if (options.subagentUi && !preparedSession) {
 					const assignment = options.subagentUi({ session, parentAgentId: options.parentAgentId });
 					if (assignment) {
+						nestedSubagentUi = assignment.subagentUi;
 						created.setToolUIContext(assignment.uiContext, true);
 						await awaitAbortable(session.refreshRpcHostTools(assignment.tools));
 					}

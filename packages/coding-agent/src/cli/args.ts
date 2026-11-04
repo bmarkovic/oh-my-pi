@@ -27,8 +27,14 @@ export type Mode = "text" | "json" | "rpc" | "acp" | "rpc-ui" | "control";
 export interface ControlServeLaunch {
 	hostname: string;
 	port: number;
+	/** Credential files, re-read by the daemon as they change. */
+	bearerTokenFile?: string;
+	controlKeyFile?: string;
+	/** Credentials from the environment, fixed for the process lifetime. */
 	bearerToken?: string;
 	controlKey?: string;
+	/** TLS certificate chain and key; the daemon serves `wss://` when set. */
+	tls?: { certFile: string; keyFile: string };
 }
 
 export interface Args {

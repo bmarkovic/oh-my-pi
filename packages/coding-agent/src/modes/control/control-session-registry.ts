@@ -9,6 +9,9 @@ import type { ControlPrincipal } from "./control-auth";
 import type { ControlToolBinding } from "./control-endpoint-tool";
 import type { ControlEvent } from "./wire/events";
 
+/** The error text of a turn that daemon shutdown stopped (`session_failed.code` is `daemon_shutdown`). */
+export const DAEMON_SHUTDOWN_MESSAGE = "daemon is shutting down";
+
 /** Lifecycle state of a retained handle (contract section 5). */
 export type ControlSessionState = "idle" | "active" | "terminated" | "expired";
 
@@ -27,8 +30,8 @@ export interface ControlTurn {
 	readonly usageBaseline: ControlUsageBaseline;
 	/** The last assistant message when the turn started; a different one at the end means the turn produced output. */
 	readonly assistantBaseline: unknown;
-	/** The first stop request on this turn: an interrupt or the deadline. It decides the outcome. */
-	stop: "interrupt" | "timeout" | "terminate" | undefined;
+	/** The first stop request on this turn: an interrupt, the deadline, a hard stop, or daemon shutdown. It decides the outcome. */
+	stop: "interrupt" | "timeout" | "terminate" | "shutdown" | undefined;
 	/** Set once the turn's outcome has been published. */
 	settled: boolean;
 	deadline: Timer | undefined;
@@ -49,11 +52,13 @@ export interface ControlSessionRecord {
 	lane: Promise<void>;
 	/** The session that spawned this one; `undefined` for a root session. */
 	readonly parentSessionId?: string;
+	/** The root of this handle's tree (its own id for a root). Events route to the connections attached to it. */
+	readonly rootSessionId: string;
 	/** Set while the handle is being torn down (terminate or idle expiry), so a second teardown or a prompt cannot race it. */
 	retirement?: Promise<void>;
 	/** The last settled outcome or retirement event, reported by `inspect_session` and `reconnect`. */
 	lastOutcome?: ControlEvent;
-	/** Direct children, in creation order, including settled ones. */
+	/** Direct children, in creation order, including settled ones. Grandchildren are listed on their own parent. */
 	readonly children: string[];
 }
 

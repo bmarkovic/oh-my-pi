@@ -10,7 +10,7 @@ import { buildControlCatalog, type ControlCatalogSource, catalogModelId } from "
 import type { ControlPrincipal } from "./control-auth";
 import type { ControlConnection, ControlOperationHandler } from "./control-connection";
 import { CONTROL_OPERATIONS, defineOperation } from "./control-operations";
-import { type ControlToolBinding, createEndpointTool, parseToolBindings } from "./control-endpoint-tool";
+import { type ControlToolBinding, createEndpointTools, parseToolBindings } from "./control-endpoint-tool";
 import type { ControlSessionFactory, ControlSessionHandle } from "./control-session-factory";
 import type { SubagentUiAssignment, SubagentUiChild } from "../../task/types";
 import { ControlChildLedger } from "./control-children";
@@ -42,11 +42,18 @@ import {
 	sessionCreatedFrame,
 	terminateSessionCommand,
 } from "./wire/commands";
-import { ackFrame, subscribeEventsCommand } from "./wire/envelope";
+import { ackFrame, CONTROL_MAX_MESSAGE_BYTES, subscribeEventsCommand } from "./wire/envelope";
+import { cutEmbeddedEvents, elideEvent, frameBytes, reconciliationSnapshots } from "./wire/elision";
 import type { ControlEvent } from "./wire/events";
 
 /** Turn budget when `create_session` omits `timeoutMs` (contract section 2.2). */
 export const DEFAULT_TURN_TIMEOUT_MS = 1_800_000;
+
+/**
+ * How long shutdown may take to settle and tear down the sessions. It sits inside the process postmortem's
+ * cleanup deadline, with room left for flushing the connections and closing them.
+ */
+export const DEFAULT_SHUTDOWN_DEADLINE_MS = 8_000;
 
 export interface ControlDaemonOptions {
 	catalog: ControlCatalogSource;
@@ -73,6 +80,8 @@ export class ControlDaemon {
 	readonly #retention: ControlRetention;
 	/** Open authenticated connections per principal. */
 	readonly #connections = new Map<ControlPrincipal, number>();
+	/** Set once shutdown starts: new work is refused, and in-flight sessions are stopped. */
+	#draining = false;
 	/** Connections that subscribed; pruned lazily once closed. */
 	readonly #subscribers = new Set<ControlConnection>();
 
@@ -86,7 +95,7 @@ export class ControlDaemon {
 			forget: sessionId => this.#forget(sessionId),
 			reclaimOrphans: principal => this.#reclaimOrphans(principal),
 		});
-		const publish = (principal: ControlPrincipal, frame: ControlEvent) => this.#publish(principal, frame);
+		const publish = (principal: ControlPrincipal, frame: ControlEvent) => this.#publish(principal, elideEvent(frame));
 		this.#decisions = new ControlDecisionStore(publish, timing.tombstoneRetentionMs);
 		this.#children = new ControlChildLedger({ publish, decisions: this.#decisions, registry: this.#registry });
 		this.#turns = new ControlTurnController(publish, this.#decisions, this.#children, this.#retention);
@@ -176,9 +185,11 @@ export class ControlDaemon {
 							return;
 						}
 						// Side-effect free: inspecting never resets the idle clock or the deadline.
-						connection.reply(
-							sessionInspectedFrame(id, record.sessionId, snapshotOf(record, this.#registry, this.#decisions)),
-						);
+						// The snapshot is a copy, so cutting its embedded events for the message limit leaves the records intact.
+						const snapshot = structuredClone(snapshotOf(record, this.#registry, this.#decisions));
+						const reply = () => sessionInspectedFrame(id, record.sessionId, snapshot);
+						cutEmbeddedEvents([snapshot], () => frameBytes(reply()) <= CONTROL_MAX_MESSAGE_BYTES);
+						connection.reply(reply());
 					},
 				}),
 			],
@@ -215,7 +226,14 @@ export class ControlDaemon {
 							for (const other of this.#subscribers) if (other !== connection) other.detach(result.sessionId);
 							connection.attach(result.sessionId);
 						}
-						connection.reply(reconciledFrame(id, sessions));
+						// Copies, so cutting embedded events for the message limit leaves the records intact.
+						const copies = structuredClone(sessions);
+						const reply = () => reconciledFrame(id, copies);
+						cutEmbeddedEvents(
+							reconciliationSnapshots(copies),
+							() => frameBytes(reply()) <= CONTROL_MAX_MESSAGE_BYTES,
+						);
+						connection.reply(reply());
 					},
 				}),
 			],
@@ -314,8 +332,35 @@ export class ControlDaemon {
 				decisions: this.#decisions,
 				parentSessionId: parent.sessionId,
 			}),
-			tools: parent.tools.map(createEndpointTool),
+			// The root's bindings, inherited unchanged at every depth: a grandchild never gets broader authority.
+			tools: createEndpointTools(parent.tools),
+			// The child's own spawns route to this child's handle, so grandchildren are handles at any depth.
+			subagentUi: grandchild => this.#routeSubagent(childId, grandchild),
 		};
+	}
+
+	/**
+	 * Stop the daemon's sessions. New `create_session` and `prompt_session` commands are refused from here on.
+	 * Each root session of every principal, attached or orphaned, is stopped in its own lane. An active turn
+	 * settles as `session_failed{daemon_shutdown}`, then its session is terminated, deepest first. If the
+	 * deadline passes first, every session still retained is disposed and the function returns.
+	 */
+	async shutdown(options: { deadlineMs?: number } = {}): Promise<void> {
+		this.#draining = true;
+		this.#retention.dispose();
+		const roots = this.#registry.all().filter(record => record.parentSessionId === undefined && !isRetired(record));
+		const stopping = Promise.allSettled(roots.map(root => this.#inLane(root, () => this.#turns.shutdown(root))));
+		const deadline = Promise.withResolvers<"deadline">();
+		const timer = setTimeout(() => deadline.resolve("deadline"), options.deadlineMs ?? DEFAULT_SHUTDOWN_DEADLINE_MS);
+		const outcome = await Promise.race([stopping.then(() => "stopped" as const), deadline.promise]);
+		clearTimeout(timer);
+		if (outcome === "deadline") {
+			logger.warn("control daemon shutdown deadline reached; disposing remaining sessions", {
+				sessions: this.#registry.all().length,
+			});
+			// Not awaited: a session whose dispose never settles must not hold the shutdown past its deadline.
+			void this.#registry.disposeAll();
+		}
 	}
 
 	/** Dispose every retained session and clear the retention clocks. Called once at shutdown. */
@@ -331,10 +376,11 @@ export class ControlDaemon {
 		if (record && !isRetired(record)) void this.#turns.expireIdle(record);
 	}
 
+	/** Forget a handle and every descendant, deepest first. */
 	#forget(sessionId: string): void {
 		const record = this.#registry.find(sessionId);
 		if (!record) return;
-		for (const childId of record.children) this.#registry.forget(childId);
+		for (const childId of record.children) this.#forget(childId);
 		this.#registry.forget(sessionId);
 	}
 
@@ -351,8 +397,9 @@ export class ControlDaemon {
 	 * its root session. A session whose connection was lost stays detached, and receives no live
 	 * events anywhere, until `reconnect` reclaims it and its snapshot is sent (contract section 2.4).
 	 */
-	#publish(principal: ControlPrincipal, frame: ControlEvent): void {
-		const rootId = frame.parentSessionId ?? frame.sessionId;
+	#publish(principal: ControlPrincipal, frame: ControlEvent): ControlEvent {
+		// A handle at any depth routes through its root, which is the handle connections attach to.
+		const rootId = this.#registry.find(frame.sessionId)?.rootSessionId ?? frame.parentSessionId ?? frame.sessionId;
 		for (const connection of this.#subscribers) {
 			if (connection.closed) {
 				this.#subscribers.delete(connection);
@@ -362,6 +409,7 @@ export class ControlDaemon {
 				connection.reply(frame);
 			}
 		}
+		return frame;
 	}
 
 	/** Run one prompt-class command after every earlier command on the same session. */
@@ -372,6 +420,10 @@ export class ControlDaemon {
 	}
 
 	async #promptSession(connection: ControlConnection, id: string, command: PromptSessionCommand): Promise<void> {
+		if (this.#draining) {
+			connection.reject("unsupported_operation", "daemon is shutting down", id);
+			return;
+		}
 		const record = this.#registry.lookup(connection.principal, command.sessionId);
 		if (!record) {
 			connection.reject("unknown_session", "session is not retained", id);
@@ -405,7 +457,7 @@ export class ControlDaemon {
 				}
 				try {
 					// Atomic: the replacement is validated whole before any binding is installed.
-					await record.session.refreshRpcHostTools(bindings.map(createEndpointTool));
+					await record.session.refreshRpcHostTools(createEndpointTools(bindings));
 				} catch (error) {
 					connection.reject(
 						"invalid_message",
@@ -433,6 +485,10 @@ export class ControlDaemon {
 	}
 
 	async #createSessionFor(connection: ControlConnection, id: string, command: CreateSessionCommand): Promise<void> {
+		if (this.#draining) {
+			connection.reject("unsupported_operation", "daemon is shutting down", id);
+			return;
+		}
 		if (!path.isAbsolute(command.workspacePath) || !(await isReadableDirectory(command.workspacePath))) {
 			connection.reject("invalid_workspace", "workspacePath must be an existing, readable absolute directory", id);
 			return;
@@ -452,11 +508,13 @@ export class ControlDaemon {
 			}
 		}
 
-		// Resolve every selection before any side effect, so a bad selection creates nothing.
+		// Resolve every selection before any side effect, so a bad selection creates nothing. Agents come from
+		// the same discovery `query_catalog` lists (the daemon's cwd), so an advertised agent is always accepted
+		// and an unlisted one is never selected through the worktree it happens to contain.
 		const agent =
 			command.agent === undefined
 				? undefined
-				: (await this.#catalog.agents(command.workspacePath)).find(candidate => candidate.name === command.agent);
+				: (await this.#catalog.agents(this.#daemonCwd)).find(candidate => candidate.name === command.agent);
 		if (command.agent !== undefined && agent === undefined) {
 			connection.reject("unknown_agent", "agent is not in the catalog", id);
 			return;
@@ -486,7 +544,7 @@ export class ControlDaemon {
 		}
 		if (bindings.length > 0) {
 			try {
-				await handle.session.refreshRpcHostTools(bindings.map(createEndpointTool));
+				await handle.session.refreshRpcHostTools(createEndpointTools(bindings));
 			} catch (error) {
 				logger.warn("control tool bindings could not be installed", { error: String(error) });
 				await handle.session.dispose().catch(() => undefined);
@@ -497,6 +555,13 @@ export class ControlDaemon {
 				);
 				return;
 			}
+		}
+		// Shutdown may have started while the session was being built. It already stopped the sessions it knew,
+		// so registering this one would leave it to be disposed without an outcome.
+		if (this.#draining) {
+			await handle.session.dispose().catch(() => undefined);
+			connection.reject("unsupported_operation", "daemon is shutting down", id);
+			return;
 		}
 		// Questions the session's tools ask a human become decisions owned by this principal.
 		handle.setToolUIContext(
@@ -512,6 +577,7 @@ export class ControlDaemon {
 			session: handle.session,
 			tools: bindings,
 			lane: Promise.resolve(),
+			rootSessionId: sessionId,
 			children: [],
 		});
 		this.#retention.armIdle(sessionId);

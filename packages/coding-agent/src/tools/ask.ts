@@ -758,11 +758,12 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const timeout = planModeEnabled ? null : settingsTimeout;
 		// A message the user queues closes the dialog without cancelling the turn: they moved on, and the
 		// message reaches the agent at the batch boundary. Peer IRC, asides and finished background jobs are
-		// not the user's answer, so the dialog stays open for it.
+		// not the user's answer, so the dialog stays open for it. A host whose questions have an owner other
+		// than the typing user (the control daemon) keeps the dialog open for steering too.
 		const steeringSignal = context?.toolCall?.steeringSignal;
 		const userSteering = new AbortController();
 		const onSteer = () => {
-			if (steeringSignal?.reason === "user") userSteering.abort();
+			if (steeringSignal?.reason === "user" && !extensionUi.keepsDialogsOnSteer) userSteering.abort();
 		};
 		if (steeringSignal?.aborted) onSteer();
 		else steeringSignal?.addEventListener("abort", onSteer, { once: true });

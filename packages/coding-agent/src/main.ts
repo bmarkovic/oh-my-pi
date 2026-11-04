@@ -2485,8 +2485,11 @@ export async function runRootCommand(
 			await runControlServe({
 				hostname: serveLaunch.hostname,
 				port: serveLaunch.port,
+				bearerTokenFile: serveLaunch.bearerTokenFile,
+				controlKeyFile: serveLaunch.controlKeyFile,
 				bearerToken: serveLaunch.bearerToken,
 				controlKey: serveLaunch.controlKey,
+				tls: serveLaunch.tls,
 				catalog: createRegistryCatalogSource(modelRegistry),
 				createSession: createControlSessionFactory(createHeadlessControlSession),
 				daemonCwd: cwd,

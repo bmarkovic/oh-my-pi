@@ -10,11 +10,22 @@ import type { ControlPrincipal } from "./control-auth";
 import type { ControlChildLedger } from "./control-children";
 import type { ControlRetention } from "./control-retention";
 import type { ControlDecisionStore } from "./control-decisions";
-import type { ControlSessionRecord, ControlTurn, ControlUsageBaseline } from "./control-session-registry";
+import {
+	type ControlSessionRecord,
+	type ControlTurn,
+	type ControlUsageBaseline,
+	DAEMON_SHUTDOWN_MESSAGE,
+} from "./control-session-registry";
 import type { ControlEvent, ControlUsage } from "./wire/events";
 
-/** Publishes one server event to the subscribed connections of a principal. */
-export type ControlPublisher = (principal: ControlPrincipal, frame: ControlEvent) => void;
+/**
+ * Publishes one server event to the subscribed connections of a principal. Returns the event as delivered
+ * (elided when it was oversize); a caller that keeps the event stores that returned form.
+ */
+export type ControlPublisher = (principal: ControlPrincipal, frame: ControlEvent) => ControlEvent;
+
+/** Longest delay a timer accepts: 32-bit signed milliseconds. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 interface UsageSource {
 	getUsageStatistics(): ControlUsageBaseline;
@@ -102,8 +113,7 @@ export class ControlTurnController {
 				at: Date.now(),
 				reason: "idle_ttl",
 			};
-			record.lastOutcome = event;
-			this.#publish(record.principal, event);
+			record.lastOutcome = this.#publish(record.principal, event);
 			this.#retention.cancelIdle(record.sessionId);
 			this.#retention.armForget(record.sessionId);
 		} finally {
@@ -128,7 +138,7 @@ export class ControlTurnController {
 		record.turn = turn;
 		record.state = "active";
 		this.#retention.cancelIdle(record.sessionId);
-		turn.deadline = setTimeout(() => this.#expireDeadline(record, turn), record.timeoutMs);
+		this.#armDeadline(record, turn, record.timeoutMs);
 		this.#publish(record.principal, {
 			version: 2,
 			type: "session_started",
@@ -174,6 +184,29 @@ export class ControlTurnController {
 		return Promise.resolve();
 	}
 
+	/**
+	 * Stop the session for daemon shutdown. An active turn settles as `session_failed{daemon_shutdown}`, with
+	 * its children settled and terminated first, and then the session is torn down and `session_terminated`
+	 * is published. An idle session is torn down directly. Resolves once the handle is retired.
+	 */
+	async shutdown(record: ControlSessionRecord): Promise<void> {
+		if (record.retirement !== undefined) return record.retirement;
+		const turn = record.turn;
+		if (turn) {
+			if (turn.stop === undefined) turn.stop = "shutdown";
+			this.#children.markForShutdown(record);
+			this.#decisions.invalidateSession(record.sessionId);
+			record.session.abort({ reason: "daemon shutdown" }).catch((error: unknown) => {
+				logger.warn("control shutdown abort failed", { sessionId: record.sessionId, error: describeError(error) });
+			});
+			// The run ends in one of three ways: a shutdown run retires the handle itself, an earlier stop settles the
+			// turn, or the handle is already retiring. Wait for the turn to leave the record.
+			while (record.turn === turn && record.retirement === undefined) await Bun.sleep(5);
+			if (record.retirement !== undefined) return record.retirement;
+		}
+		return this.#retire(record, undefined);
+	}
+
 	/** Queue a steering message into the active turn; no new start and no deadline change. */
 	async steer(record: ControlSessionRecord, prompt: string): Promise<void> {
 		await record.session.steer(prompt);
@@ -193,6 +226,13 @@ export class ControlTurnController {
 			// Owned child turns settle before the parent's outcome (contract section 5).
 			await this.#children.settleChildren(record);
 			if (turn.settled) return;
+		}
+		if (turn.stop === "shutdown") {
+			// Children have settled, and their terminal events are published before the root's own outcome.
+			await this.#children.terminateChildren(record);
+			this.#settleFailed(record, turn, "daemon_shutdown", DAEMON_SHUTDOWN_MESSAGE);
+			await this.#retire(record, undefined);
+			return;
 		}
 		if (turn.stop === "terminate") {
 			await this.#retire(record, turn);
@@ -224,6 +264,19 @@ export class ControlTurnController {
 			return;
 		}
 		this.#settleCompleted(record, turn, assistantText(last));
+	}
+
+	/**
+	 * Arm the turn deadline `remainingMs` from now. A timer cannot wait longer than {@link MAX_TIMER_DELAY_MS}
+	 * (a longer delay fires after 1 ms), so a longer budget is waited out in hops; `turn.deadline` is always
+	 * the pending hop, which is what settling clears.
+	 */
+	#armDeadline(record: ControlSessionRecord, turn: ControlTurn, remainingMs: number): void {
+		const delay = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+		turn.deadline = setTimeout(() => {
+			if (remainingMs > delay) this.#armDeadline(record, turn, remainingMs - delay);
+			else this.#expireDeadline(record, turn);
+		}, delay);
 	}
 
 	#expireDeadline(record: ControlSessionRecord, turn: ControlTurn): void {
@@ -329,8 +382,7 @@ export class ControlTurnController {
 				sessionId: record.sessionId,
 				at: Date.now(),
 			};
-			record.lastOutcome = event;
-			this.#publish(record.principal, event);
+			record.lastOutcome = this.#publish(record.principal, event);
 		}
 		record.state = "terminated";
 		this.#retention.cancelIdle(record.sessionId);
@@ -348,9 +400,7 @@ export class ControlTurnController {
 			record.turn = undefined;
 			record.state = "idle";
 		}
-		const event = build();
-		record.lastOutcome = event;
-		this.#publish(record.principal, event);
+		record.lastOutcome = this.#publish(record.principal, build());
 		if (record.state === "idle") this.#retention.armIdle(record.sessionId);
 	}
 }

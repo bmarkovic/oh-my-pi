@@ -9,11 +9,12 @@ import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli"
 import { type Args as ParsedArgs, parseArgs, reportCliUsageError } from "../cli/args";
 import { controlHelp as commandHelp } from "../cli/command-help";
 import { runRootCommand } from "../main";
-import { isLoopbackHost } from "../modes/control/control-server";
+import { assertPrivateCredentialFile, readCredentialFile } from "../modes/control/control-credential-file";
+import { bindPolicy } from "../modes/control/control-server";
 
 const DEFAULT_BIND = "127.0.0.1:0";
 /** Flags this subcommand consumes; they are removed before the rest of argv reaches the launch parser. */
-const CONTROL_VALUE_FLAGS = new Set(["--bind", "--token-file", "--key-file"]);
+const CONTROL_VALUE_FLAGS = new Set(["--bind", "--token-file", "--key-file", "--tls-cert", "--tls-key"]);
 
 export default class Control extends Command {
 	static description = commandHelp.description;
@@ -28,16 +29,26 @@ export default class Control extends Command {
 
 	static flags = {
 		bind: Flags.string({
-			description: "Loopback listen address as host:port (port 0 picks a free port)",
+			description:
+				"Listen address as host:port (port 0 picks a free port); a non-loopback host needs --tls-cert and --tls-key, and a wildcard address such as 0.0.0.0 is refused",
 			default: DEFAULT_BIND,
 		}),
-		"token-file": Flags.string({ description: "File holding the bearer token (or set OMP_CONTROL_TOKEN)" }),
-		"key-file": Flags.string({ description: "File holding the X-Omp-Control-Key value (or set OMP_CONTROL_KEY)" }),
+		"token-file": Flags.string({
+			description:
+				"File holding the bearer token, readable only by you (mode 0600), re-read as it changes; or set OMP_CONTROL_TOKEN",
+		}),
+		"key-file": Flags.string({
+			description:
+				"File holding the X-Omp-Control-Key value, readable only by you (mode 0600), re-read as it changes; or set OMP_CONTROL_KEY",
+		}),
+		"tls-cert": Flags.string({ description: "PEM certificate chain: serve wss:// (requires --tls-key)" }),
+		"tls-key": Flags.string({ description: "PEM private key for --tls-cert, readable only by you (mode 0600)" }),
 	};
 
 	static examples = [
 		"# Serve on a free loopback port with a token file\n  omp control serve --token-file ~/.omp/control.token",
 		"# Serve with the token from the environment\n  OMP_CONTROL_TOKEN=... omp control serve --bind 127.0.0.1:7077",
+		"# Serve on a private interface over TLS\n  omp control serve --bind 10.0.0.5:7077 --tls-cert server.pem --tls-key server.key --token-file ~/.omp/control.token",
 	];
 
 	async run(): Promise<void> {
@@ -53,12 +64,34 @@ export default class Control extends Command {
 			process.exitCode = 2;
 			return;
 		}
-		if (!isLoopbackHost(bind.hostname)) {
-			process.stderr.write(
-				`--bind must be a loopback address; remote control requires TLS, which is not available.\n`,
-			);
+		const tlsCertFile = flags["tls-cert"];
+		const tlsKeyFile = flags["tls-key"];
+		if ((tlsCertFile === undefined) !== (tlsKeyFile === undefined)) {
+			process.stderr.write("--tls-cert and --tls-key must be given together.\n");
+			process.exitCode = 2;
+			return;
+		}
+		const tls =
+			tlsCertFile !== undefined && tlsKeyFile !== undefined
+				? { certFile: tlsCertFile, keyFile: tlsKeyFile }
+				: undefined;
+		const bindProblem = bindPolicy(bind.hostname, tls !== undefined);
+		if (bindProblem !== undefined) {
+			process.stderr.write(`${bindProblem}\n`);
 			process.exitCode = 1;
 			return;
+		}
+		if (tls !== undefined) {
+			try {
+				await assertPrivateCredentialFile(tls.keyFile);
+				if (!(await Bun.file(tls.certFile).exists())) {
+					throw new Error(`cannot read TLS certificate file: ${tls.certFile}`);
+				}
+			} catch (error) {
+				process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+				process.exitCode = 1;
+				return;
+			}
 		}
 
 		let bearerToken: string | undefined;
@@ -91,7 +124,18 @@ export default class Control extends Command {
 			throw error;
 		}
 		parsed.mode = "control";
-		parsed.controlServe = { hostname: bind.hostname, port: bind.port, bearerToken, controlKey };
+		// File credentials go to the daemon as paths, so rotation is picked up; environment ones are passed as values.
+		const bearerTokenFile = flags["token-file"];
+		const controlKeyFile = flags["key-file"];
+		parsed.controlServe = {
+			hostname: bind.hostname,
+			port: bind.port,
+			bearerTokenFile,
+			controlKeyFile,
+			bearerToken: bearerTokenFile === undefined ? bearerToken : undefined,
+			controlKey: controlKeyFile === undefined ? controlKey : undefined,
+			tls,
+		};
 		await runRootCommand(parsed, launchArgs);
 	}
 }
@@ -115,15 +159,7 @@ export async function readCredential(file: string | undefined, envName: string):
 	// which inherit this process's environment: contract section 6 keeps control secrets from agents.
 	delete Bun.env[envName];
 	if (file === undefined) return fromEnv ? fromEnv : undefined;
-	let text: string;
-	try {
-		text = await Bun.file(file).text();
-	} catch {
-		throw new Error(`cannot read credential file: ${file}`);
-	}
-	const value = text.trim();
-	if (value.length === 0) throw new Error(`credential file is empty: ${file}`);
-	return value;
+	return readCredentialFile(file);
 }
 
 /** Remove the subcommand action and this subcommand's flags from argv, keeping everything else. */

@@ -17,6 +17,8 @@ interface ControlEventBase<T extends string> {
 	sessionId: string;
 	parentSessionId?: string;
 	at: number;
+	/** JSON Pointers of the fields cut to fit the message limit. Absent when nothing was cut. */
+	elided?: string[];
 }
 
 export type SessionStartedEvent = ControlEventBase<"session_started">;

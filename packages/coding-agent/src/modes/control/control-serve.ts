@@ -8,13 +8,16 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 import type { ControlCatalogSource } from "./control-catalog";
 import { ControlDaemon } from "./control-daemon";
 import type { ControlSessionFactory } from "./control-session-factory";
-import { startControlServer } from "./control-server";
+import { type ControlTlsFiles, startControlServer } from "./control-server";
 
 export interface RunControlServeOptions {
 	hostname: string;
 	port: number;
+	bearerTokenFile?: string;
+	controlKeyFile?: string;
 	bearerToken?: string;
 	controlKey?: string;
+	tls?: ControlTlsFiles;
 	catalog: ControlCatalogSource;
 	createSession: ControlSessionFactory;
 	daemonCwd: string;
@@ -29,6 +32,8 @@ export async function runControlServe(options: RunControlServeOptions): Promise<
 	const server = await startControlServer({
 		hostname: options.hostname,
 		port: options.port,
+		credentialFiles: { bearerTokenFile: options.bearerTokenFile, controlKeyFile: options.controlKeyFile },
+		tls: options.tls,
 		bearerToken: options.bearerToken,
 		controlKey: options.controlKey,
 		operations: daemon.operations(),
@@ -37,6 +42,10 @@ export async function runControlServe(options: RunControlServeOptions): Promise<
 	const stopped = Promise.withResolvers<void>();
 	const unregister = postmortem.register("control-serve", async () => {
 		try {
+			// Stop taking new clients, stop the sessions (each settles or terminates before its connection closes),
+			// then flush and close the connections.
+			server.stopAccepting();
+			await daemon.shutdown();
 			await server.close();
 			await daemon.dispose();
 		} finally {

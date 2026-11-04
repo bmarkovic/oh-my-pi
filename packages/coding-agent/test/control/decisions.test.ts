@@ -148,6 +148,40 @@ describe("control decisions", () => {
 		expect((await nextOfType(client, "decision_answered")).optionId).toBe("0");
 	});
 
+	it("keeps a question pending when the session is steered, and delivers the steering after the answer", async () => {
+		const mock = createMockModel({
+			provider: "mock",
+			id: "model-a",
+			responses: [askCall([{ label: "Alpha" }, { label: "Beta" }]), { content: ["done"] }],
+		});
+		const { client, workspace } = await setup(mock);
+		const sessionId = await createSessionFor(client, workspace);
+		await client.request({ version: 2, id: "p1", type: "prompt_session", sessionId, prompt: "decide" });
+		const decisionId = String((await nextOfType(client, "decision_requested")).decisionId);
+
+		// Contract section 4.3: steering cannot silently answer or cancel a pending question.
+		expect(
+			await client.request({ version: 2, id: "steer", type: "prompt_session", sessionId, prompt: "STEER_TEXT" }),
+		).toEqual({ version: 2, inReplyTo: "steer", type: "ack" });
+		// Longer than the steering poll interval, so a steering-triggered cancellation would have landed.
+		await Bun.sleep(700);
+
+		const inspected = await client.request({ version: 2, id: "i1", type: "inspect_session", sessionId });
+		expect(inspected.snapshot).toMatchObject({ status: "active", waitingHumanInput: true });
+		expect((inspected.snapshot as { pendingDecisions: Array<{ decisionId: string }> }).pendingDecisions).toEqual([
+			expect.objectContaining({ decisionId }),
+		]);
+
+		expect(
+			await client.request({ version: 2, id: "a1", type: "answer_decision", decisionId, optionId: "1" }),
+		).toEqual({ version: 2, inReplyTo: "a1", type: "ack" });
+		expect(await nextOfType(client, "decision_answered")).toMatchObject({ decisionId, optionId: "1" });
+		expect(await nextOfType(client, "session_completed")).toMatchObject({ sessionId, output: "done" });
+		const seen = JSON.stringify(mock.calls[mock.calls.length - 1].context.messages);
+		expect(seen).toContain("Beta");
+		expect(seen).toContain("STEER_TEXT");
+	}, 15_000);
+
 	it("rejects an answer after an interrupt, and an answer from another credential", async () => {
 		const mock = createMockModel({
 			provider: "mock",

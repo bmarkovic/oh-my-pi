@@ -334,11 +334,14 @@ export async function startDaemonWith(options: {
 	createSession: ControlSessionFactory;
 	daemonCwd: string;
 	retention?: Partial<ControlRetentionTiming>;
+	/** Listener options, for example credential files instead of the fixed test credentials. */
+	server?: TestDaemonOptions;
 }): Promise<{ server: TestDaemon; control: ControlDaemon; dispose(): Promise<void> }> {
 	const control = new ControlDaemon(options);
 	const server = await startTestDaemon({
 		operations: control.operations(),
 		onConnection: (principal, opened) => control.connectionChanged(principal, opened),
+		...options.server,
 	});
 	return {
 		server,
@@ -398,4 +401,69 @@ export async function createSessionFor(
 	});
 	if (reply.type !== "session_created") throw new Error(`create failed: ${JSON.stringify(reply)}`);
 	return String(reply.sessionId);
+}
+
+/** One server frame as it arrived on a raw socket: its opcode and, for text and close frames, its payload. */
+export interface ServerFrame {
+	opcode: number;
+	payload: Buffer;
+}
+
+/** Take one complete unmasked server frame from the front of `buffer`, or `undefined` when more bytes are needed. */
+function takeServerFrame(buffer: Buffer): { frame: ServerFrame; rest: Buffer } | undefined {
+	if (buffer.length < 2) return undefined;
+	const opcode = buffer[0] & 0x0f;
+	let length = buffer[1] & 0x7f;
+	let offset = 2;
+	if (length === 126) {
+		if (buffer.length < 4) return undefined;
+		length = buffer.readUInt16BE(2);
+		offset = 4;
+	} else if (length === 127) {
+		if (buffer.length < 10) return undefined;
+		length = Number(buffer.readBigUInt64BE(2));
+		offset = 10;
+	}
+	if (buffer.length < offset + length) return undefined;
+	return {
+		frame: { opcode, payload: buffer.subarray(offset, offset + length) },
+		rest: buffer.subarray(offset + length),
+	};
+}
+
+/**
+ * Resume a raw socket from `silentUpgradedSocket` and collect the server frames it receives, up to and
+ * including its first close frame, or until the socket ends or `timeoutMs` passes.
+ */
+export function collectServerFrames(socket: net.Socket, timeoutMs = 5_000): Promise<ServerFrame[]> {
+	const { promise, resolve } = Promise.withResolvers<ServerFrame[]>();
+	const frames: ServerFrame[] = [];
+	let buffer: Buffer = Buffer.alloc(0);
+	const finish = () => {
+		clearTimeout(timer);
+		socket.off("data", onData);
+		socket.off("end", finish);
+		socket.off("close", finish);
+		socket.destroy();
+		resolve(frames);
+	};
+	const onData = (chunk: Buffer) => {
+		buffer = Buffer.concat([buffer, chunk]);
+		for (let taken = takeServerFrame(buffer); taken !== undefined; taken = takeServerFrame(buffer)) {
+			buffer = taken.rest;
+			frames.push(taken.frame);
+			if (taken.frame.opcode === 0x8) return finish();
+		}
+	};
+	const timer = setTimeout(finish, timeoutMs);
+	socket.on("data", onData);
+	socket.on("end", finish);
+	socket.on("close", finish);
+	socket.resume();
+	return promise;
+}
+
+/** Decode a text server frame's payload as one JSON frame. */
+export function textFrameJson(frame: ServerFrame): Frame {
+	return JSON.parse(frame.payload.toString("utf8")) as Frame;
 }

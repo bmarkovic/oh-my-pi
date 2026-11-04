@@ -1,21 +1,21 @@
 /**
- * Child lineage. A subagent a root control session spawns becomes a child handle
- * when its session is built: its `session_started` carries the parent's handle,
- * and each run it makes settles once as a child-scoped outcome. Interrupt and
- * terminate cascade to the children, whose terminal events precede the parent's.
- * Only direct children of a root are tracked; deeper descendants are disposed with
- * their owning child.
+ * Child lineage. A subagent a control session spawns becomes a child handle when its
+ * session is built, at any depth: its `session_started` carries the immediate parent's
+ * handle, and each run it makes settles once as a child-scoped outcome. Interrupt,
+ * settle, terminate and expiry cascade through the whole subtree, deepest first, so a
+ * descendant's terminal event precedes its parent's.
  */
 import type { AgentSession } from "../../session/agent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ControlPublisher } from "./control-turn";
 import { assistantText, turnUsage, waitUntilQuiet } from "./control-turn";
 import type { ControlDecisionStore } from "./control-decisions";
-import type {
-	ControlSessionRecord,
-	ControlSessionRegistry,
-	ControlTurn,
-	ControlUsageBaseline,
+import {
+	type ControlSessionRecord,
+	type ControlSessionRegistry,
+	type ControlTurn,
+	type ControlUsageBaseline,
+	DAEMON_SHUTDOWN_MESSAGE,
 } from "./control-session-registry";
 import type { ControlEvent, ControlUsage } from "./wire/events";
 
@@ -63,6 +63,7 @@ export class ControlChildLedger {
 			tools: parent.tools,
 			lane: Promise.resolve(),
 			parentSessionId: parent.sessionId,
+			rootSessionId: parent.rootSessionId,
 			children: [],
 		};
 		this.#registry.register(child);
@@ -81,12 +82,17 @@ export class ControlChildLedger {
 		return child;
 	}
 
-	/** Abort every active child run. Each settles as `session_interrupted` once it has unwound. */
+	/**
+	 * Abort every active run in the subtree, deepest first. Each settles as `session_interrupted` once it
+	 * has unwound; a parent's settle waits for its children (see {@link settleChildren}).
+	 */
 	interruptChildren(parent: ControlSessionRecord): void {
 		for (const childId of parent.children) {
 			const child = this.#registry.find(childId);
-			const turn = child?.turn;
-			if (!child || !turn || turn.stop !== undefined) continue;
+			if (!child) continue;
+			this.interruptChildren(child);
+			const turn = child.turn;
+			if (!turn || turn.stop !== undefined) continue;
 			turn.stop = "interrupt";
 			this.#decisions.invalidateSession(child.sessionId);
 			// The run may end without a terminal `agent_end` reaching this listener, so settle once the session is quiet.
@@ -99,20 +105,20 @@ export class ControlChildLedger {
 		}
 	}
 
-	/** Wait for every child run still in progress to unwind, and publish each child's outcome. */
+	/**
+	 * Wait for every child run in the subtree to unwind, and publish each outcome. Deepest first: a child
+	 * settles only after its own children have.
+	 */
 	async settleChildren(parent: ControlSessionRecord): Promise<void> {
 		for (const childId of parent.children) {
 			const child = this.#registry.find(childId);
-			const turn = child?.turn;
-			if (!child || !turn) continue;
-			await waitUntilQuiet(child.session);
-			if (child.turn === turn && child.state !== "terminated") this.#settle(child, turn);
+			if (child) await this.#settleSubtree(child);
 		}
 	}
 
 	/**
-	 * Hard-stop every child, in creation order: abort active runs, dispose each session,
-	 * and publish `session_terminated` for it. Settles before the parent's own teardown.
+	 * Hard-stop every child in the subtree, deepest first: abort active runs, dispose each session, and
+	 * publish `session_terminated` for it. A child's terminal event precedes its parent's.
 	 */
 	async terminateChildren(parent: ControlSessionRecord): Promise<void> {
 		for (const childId of parent.children) {
@@ -123,6 +129,8 @@ export class ControlChildLedger {
 			this.#decisions.invalidateSession(child.sessionId);
 			this.#unsubscribers.get(child.sessionId)?.();
 			this.#unsubscribers.delete(child.sessionId);
+			// Marks and tears down the child's own subtree before the child's session is disposed.
+			await this.terminateChildren(child);
 			await child.session.abort({ reason: "control terminate" }).catch(() => undefined);
 			try {
 				await child.session.dispose();
@@ -144,20 +152,40 @@ export class ControlChildLedger {
 		}
 	}
 
+	/**
+	 * Mark every active run in the subtree for daemon shutdown and abort it. Each settles as
+	 * `session_failed{code:"daemon_shutdown"}` once it has unwound (see {@link settleChildren}).
+	 */
+	markForShutdown(parent: ControlSessionRecord): void {
+		for (const childId of parent.children) {
+			const child = this.#registry.find(childId);
+			if (!child) continue;
+			const turn = child.turn;
+			if (turn && turn.stop === undefined) {
+				turn.stop = "shutdown";
+				this.#decisions.invalidateSession(child.sessionId);
+				child.session.abort({ reason: "daemon shutdown" }).catch((error: unknown) => {
+					logger.warn("control child shutdown abort failed", { sessionId: child.sessionId, error: String(error) });
+				});
+			}
+			this.markForShutdown(child);
+		}
+	}
+
 	/** Publish a settled outcome and keep it as the child's last outcome. */
 	#outcome(child: ControlSessionRecord, event: ControlEvent): void {
-		child.lastOutcome = event;
-		this.#publish(child.principal, event);
+		child.lastOutcome = this.#publish(child.principal, event);
 	}
 
 	/**
-	 * Expire the idle children of an idle parent that is being expired. A child with
+	 * Expire the idle children of an idle parent that is being expired, deepest first. A child with
 	 * a turn in progress is left alone; the parent cannot be idle while one runs.
 	 */
 	async expireChildren(parent: ControlSessionRecord): Promise<void> {
 		for (const childId of parent.children) {
 			const child = this.#registry.find(childId);
 			if (!child || child.state !== "idle" || child.turn !== undefined) continue;
+			await this.expireChildren(child);
 			this.#unsubscribers.get(child.sessionId)?.();
 			this.#unsubscribers.delete(child.sessionId);
 			try {
@@ -198,16 +226,30 @@ export class ControlChildLedger {
 		});
 	}
 
+	#parentTerminating(child: ControlSessionRecord): boolean {
+		const parent = child.parentSessionId === undefined ? undefined : this.#registry.find(child.parentSessionId);
+		return parent?.turn?.stop === "terminate" || parent?.retirement !== undefined;
+	}
+
 	#settleWhenQuiet(child: ControlSessionRecord): void {
+		void this.#settleSubtree(child);
+	}
+
+	/** Settle a child's own subtree deepest first, then the child once it is quiet. */
+	async #settleSubtree(child: ControlSessionRecord): Promise<void> {
+		await this.settleChildren(child);
 		const turn = child.turn;
 		if (!turn) return;
-		void waitUntilQuiet(child.session).then(() => {
-			if (child.turn === turn && child.state !== "terminated") this.#settle(child, turn);
-		});
+		await waitUntilQuiet(child.session);
+		if (child.turn === turn && child.state !== "terminated") this.#settle(child, turn);
 	}
 
 	#settle(child: ControlSessionRecord, turn: ControlTurn): void {
 		if (turn.settled) return;
+		// A hard stop of the parent aborts its running children, and their aborted run reports before the
+		// parent has unwound. The child's one outcome is the session_terminated that terminateChildren
+		// publishes (contract section 4.4), not a failure for the abort that stop caused.
+		if (this.#parentTerminating(child)) return;
 		turn.settled = true;
 		child.turn = undefined;
 		child.state = "idle";
@@ -221,6 +263,16 @@ export class ControlChildLedger {
 		};
 		if (turn.stop === "interrupt") {
 			this.#outcome(child, { ...base, type: "session_interrupted", ...(usage ? { usage } : {}) });
+			return;
+		}
+		if (turn.stop === "shutdown") {
+			this.#outcome(child, {
+				...base,
+				type: "session_failed",
+				code: "daemon_shutdown",
+				error: DAEMON_SHUTDOWN_MESSAGE,
+				...(usage ? { usage } : {}),
+			});
 			return;
 		}
 		const last = child.session.getLastAssistantMessage();
