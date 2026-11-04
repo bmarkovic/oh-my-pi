@@ -111,6 +111,9 @@ describe("control credential rotation", () => {
 			await eventually(async () => (await upgradeStatus(daemon.url, bearer(TOKEN_B))) === 401);
 
 			await replaceCredential(file, TOKEN_B, 0o644);
+			// The credential was already refused while the file was missing, so a 401 straight away proves nothing:
+			// wait until the poll has read the unreadable-by-others file and refused it for its mode.
+			await eventually(async () => JSON.stringify(warnings.mock.calls).includes("0644"));
 			expect(await upgradeStatus(daemon.url, bearer(TOKEN_B))).toBe(401);
 
 			const logged = JSON.stringify(warnings.mock.calls);
